@@ -12,8 +12,8 @@ pub mod write {
         /// This is not recommended for new archives, as ZipCrypto is not secure.
         fn with_deprecated_encryption(self, password: &[u8]) -> Self;
     }
-    impl FileOptionsExt for FileOptions {
-        fn with_deprecated_encryption(self, password: &[u8]) -> Self {
+    impl<'k> FileOptionsExt for FileOptions<'k> {
+        fn with_deprecated_encryption(self, password: &[u8]) -> FileOptions<'static> {
             self.with_deprecated_encryption(password)
         }
     }

@@ -4,9 +4,12 @@ use crate::compression::CompressionMethod;
 use crate::read::{central_header_to_zip_file, ZipArchive, ZipFile};
 use crate::result::{ZipError, ZipResult};
 use crate::spec;
-use crate::types::{AtomicU64, DateTime, System, ZipFileData, DEFAULT_VERSION};
+use crate::types::{
+    AesMode, AesVendorVersion, AtomicU64, DateTime, System, ZipFileData, DEFAULT_VERSION,
+};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
+#[cfg(feature = "time")]
 use std::convert::TryInto;
 use std::default::Default;
 use std::io;
@@ -31,19 +34,25 @@ use zstd::stream::write::Encoder as ZstdEncoder;
 
 enum MaybeEncrypted<W> {
     Unencrypted(W),
-    Encrypted(crate::zipcrypto::ZipCryptoWriter<W>),
+    #[cfg(feature = "aes-crypto")]
+    Aes(crate::aes::AesWriter<W>),
+    ZipCrypto(crate::zipcrypto::ZipCryptoWriter<W>),
 }
 impl<W: Write> Write for MaybeEncrypted<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             MaybeEncrypted::Unencrypted(w) => w.write(buf),
-            MaybeEncrypted::Encrypted(w) => w.write(buf),
+            MaybeEncrypted::ZipCrypto(w) => w.write(buf),
+            #[cfg(feature = "aes-crypto")]
+            MaybeEncrypted::Aes(w) => w.write(buf),
         }
     }
     fn flush(&mut self) -> io::Result<()> {
         match self {
             MaybeEncrypted::Unencrypted(w) => w.flush(),
-            MaybeEncrypted::Encrypted(w) => w.flush(),
+            MaybeEncrypted::ZipCrypto(w) => w.flush(),
+            #[cfg(feature = "aes-crypto")]
+            MaybeEncrypted::Aes(w) => w.flush(),
         }
     }
 }
@@ -118,24 +127,37 @@ struct ZipRawValues {
     uncompressed_size: u64,
 }
 
+#[derive(Copy, Clone)]
+enum EncryptWith<'k> {
+    ZipCrypto(crate::zipcrypto::ZipCryptoKeys),
+    // This shouldn't be available if the "aes-crypto" feature isn't enabled, but if we make it
+    // conditionally compiled we would end up with an unused lifetime which throws a compilation
+    // error.
+    #[allow(unused)]
+    Aes {
+        mode: AesMode,
+        password: &'k str,
+    },
+}
+
 /// Metadata for a file to be written
 #[derive(Copy, Clone)]
-pub struct FileOptions {
+pub struct FileOptions<'k> {
     compression_method: CompressionMethod,
     compression_level: Option<i32>,
     last_modified_time: DateTime,
     permissions: Option<u32>,
     large_file: bool,
-    encrypt_with: Option<crate::zipcrypto::ZipCryptoKeys>,
+    encrypt_with: Option<EncryptWith<'k>>,
 }
 
-impl FileOptions {
+impl<'k> FileOptions<'k> {
     /// Set the compression method for the new file
     ///
     /// The default is `CompressionMethod::Deflated`. If the deflate compression feature is
     /// disabled, `CompressionMethod::Stored` becomes the default.
     #[must_use]
-    pub fn compression_method(mut self, method: CompressionMethod) -> FileOptions {
+    pub fn compression_method(mut self, method: CompressionMethod) -> FileOptions<'k> {
         self.compression_method = method;
         self
     }
@@ -150,7 +172,7 @@ impl FileOptions {
     /// * `Zstd`: -7 - 22, with zero being mapped to default level. Default is 3
     /// * others: only `None` is allowed
     #[must_use]
-    pub fn compression_level(mut self, level: Option<i32>) -> FileOptions {
+    pub fn compression_level(mut self, level: Option<i32>) -> FileOptions<'k> {
         self.compression_level = level;
         self
     }
@@ -160,7 +182,7 @@ impl FileOptions {
     /// The default is the current timestamp if the 'time' feature is enabled, and 1980-01-01
     /// otherwise
     #[must_use]
-    pub fn last_modified_time(mut self, mod_time: DateTime) -> FileOptions {
+    pub fn last_modified_time(mut self, mod_time: DateTime) -> FileOptions<'k> {
         self.last_modified_time = mod_time;
         self
     }
@@ -175,7 +197,7 @@ impl FileOptions {
     /// higher file mode bits. So it cannot be used to denote an entry as a directory,
     /// symlink, or other special file type.
     #[must_use]
-    pub fn unix_permissions(mut self, mode: u32) -> FileOptions {
+    pub fn unix_permissions(mut self, mode: u32) -> FileOptions<'k> {
         self.permissions = Some(mode & 0o777);
         self
     }
@@ -186,17 +208,33 @@ impl FileOptions {
     /// readers will require ZIP64 support and if the file does not exceed the limit, 20 B are
     /// wasted. The default is `false`.
     #[must_use]
-    pub fn large_file(mut self, large: bool) -> FileOptions {
+    pub fn large_file(mut self, large: bool) -> FileOptions<'k> {
         self.large_file = large;
         self
     }
-    pub(crate) fn with_deprecated_encryption(mut self, password: &[u8]) -> FileOptions {
-        self.encrypt_with = Some(crate::zipcrypto::ZipCryptoKeys::derive(password));
-        self
+    pub(crate) fn with_deprecated_encryption(self, password: &[u8]) -> FileOptions<'static> {
+        FileOptions {
+            encrypt_with: Some(EncryptWith::ZipCrypto(
+                crate::zipcrypto::ZipCryptoKeys::derive(password),
+            )),
+            ..self
+        }
+    }
+
+    /// Set the AES encryption parameters.
+    #[cfg(feature = "aes-crypto")]
+    pub fn with_aes_encryption(self, aes_mode: AesMode, password: &str) -> FileOptions<'_> {
+        FileOptions {
+            encrypt_with: Some(EncryptWith::Aes {
+                mode: aes_mode,
+                password,
+            }),
+            ..self
+        }
     }
 }
 
-impl Default for FileOptions {
+impl Default for FileOptions<'static> {
     /// Construct a new FileOptions object
     fn default() -> Self {
         Self {
@@ -376,12 +414,20 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             let header_start = writer.stream_position()?;
 
             let permissions = options.permissions.unwrap_or(0o100644);
+            let (compression_method, aes_mode) = match options.encrypt_with {
+                #[cfg(feature = "aes-crypto")]
+                Some(EncryptWith::Aes { mode, .. }) => (
+                    CompressionMethod::Aes,
+                    Some((mode, AesVendorVersion::Ae2, options.compression_method)),
+                ),
+                _ => (options.compression_method, None),
+            };
             let mut file = ZipFileData {
                 system: System::Unix,
                 version_made_by: DEFAULT_VERSION,
                 encrypted: options.encrypt_with.is_some(),
                 using_data_descriptor: false,
-                compression_method: options.compression_method,
+                compression_method,
                 compression_level: options.compression_level,
                 last_modified_time: options.last_modified_time,
                 crc32: raw_values.crc32,
@@ -392,16 +438,19 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 extra_field: Vec::new(),
                 file_comment: String::new(),
                 header_start,
+                extra_data_start: AtomicU64::new(0),
                 data_start: AtomicU64::new(0),
                 central_header_start: 0,
                 external_attributes: permissions << 16,
                 large_file: options.large_file,
-                aes_mode: None,
+                aes_mode,
+                aes_encryption_extra_data_start: AtomicU64::new(0),
             };
             write_local_file_header(writer, &file)?;
 
             let header_end = writer.stream_position()?;
             self.stats.start = header_end;
+            *file.extra_data_start.get_mut() = header_end;
             *file.data_start.get_mut() = header_end;
 
             self.stats.bytes_written = 0;
@@ -409,12 +458,28 @@ impl<W: Write + io::Seek> ZipWriter<W> {
 
             self.files.push(file);
         }
-        if let Some(keys) = options.encrypt_with {
-            let mut zipwriter = crate::zipcrypto::ZipCryptoWriter { writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(), buffer: vec![], keys };
-            let mut crypto_header = [0u8; 12];
+        match options.encrypt_with {
+            Some(EncryptWith::ZipCrypto(keys)) => {
+                let mut zipwriter = crate::zipcrypto::ZipCryptoWriter {
+                    writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(),
+                    buffer: vec![],
+                    keys,
+                };
+                let crypto_header = [0u8; 12];
 
-            zipwriter.write_all(&crypto_header)?;
-            self.inner = GenericZipWriter::Storer(MaybeEncrypted::Encrypted(zipwriter));
+                zipwriter.write_all(&crypto_header)?;
+                self.inner = GenericZipWriter::Storer(MaybeEncrypted::ZipCrypto(zipwriter));
+            }
+            #[cfg(feature = "aes-crypto")]
+            Some(EncryptWith::Aes { mode, password }) => {
+                let aeswriter = crate::aes::AesWriter::new(
+                    core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(),
+                    mode,
+                    password.as_bytes(),
+                )?;
+                self.inner = GenericZipWriter::Storer(MaybeEncrypted::Aes(aeswriter));
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -426,26 +491,41 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         }
         self.inner.switch_to(CompressionMethod::Stored, None)?;
         match core::mem::replace(&mut self.inner, GenericZipWriter::Closed) {
-            GenericZipWriter::Storer(MaybeEncrypted::Encrypted(writer)) => {
+            GenericZipWriter::Storer(MaybeEncrypted::ZipCrypto(writer)) => {
                 let crc32 = self.stats.hasher.clone().finalize();
-                self.inner = GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer.finish(crc32)?))
+                self.inner =
+                    GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer.finish(crc32)?))
+            }
+            #[cfg(feature = "aes-crypto")]
+            GenericZipWriter::Storer(MaybeEncrypted::Aes(writer)) => {
+                self.inner = GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer.finish()?))
             }
             GenericZipWriter::Storer(w) => self.inner = GenericZipWriter::Storer(w),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
         let writer = self.inner.get_plain();
 
         if !self.writing_raw {
-            let file = match self.files.last_mut() {
+            let mut file = match self.files.last_mut() {
                 None => return Ok(()),
                 Some(f) => f,
             };
-            file.crc32 = self.stats.hasher.clone().finalize();
             file.uncompressed_size = self.stats.bytes_written;
 
             let file_end = writer.stream_position()?;
             file.compressed_size = file_end - self.stats.start;
 
+            file.crc32 = self.stats.hasher.clone().finalize();
+            if let Some(ref mut aes_mode) = file.aes_mode {
+                aes_mode.1 = if self.stats.bytes_written < 20 {
+                    file.crc32 = 0;
+                    AesVendorVersion::Ae2
+                } else {
+                    AesVendorVersion::Ae1
+                };
+            }
+
+            update_aes_extra_data(writer, file)?;
             update_local_file_header(writer, file)?;
             writer.seek(io::SeekFrom::Start(file_end))?;
         }
@@ -467,9 +547,15 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         }
         *options.permissions.as_mut().unwrap() |= 0o100000;
         self.start_entry(name, options, None)?;
+
+        self.writing_to_extra_field = true;
+        write_aes_extra_data(self.files.last_mut().unwrap(), &options)?;
+        self.end_extra_data()?;
+
         self.inner
             .switch_to(options.compression_method, options.compression_level)?;
         self.writing_to_file = true;
+
         Ok(())
     }
 
@@ -596,6 +682,9 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         self.start_entry(name, options, None)?;
         self.writing_to_file = true;
         self.writing_to_extra_field = true;
+
+        write_aes_extra_data(self.files.last_mut().unwrap(), &options)?;
+
         Ok(self.files.last().unwrap().data_start.load())
     }
 
@@ -645,8 +734,13 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             writer.write_u16::<LittleEndian>(extra_field_length)?;
             writer.seek(io::SeekFrom::Start(header_end))?;
 
+            let compression_method = if let Some((_, _, compression_method)) = file.aes_mode {
+                compression_method
+            } else {
+                file.compression_method
+            };
             self.inner
-                .switch_to(file.compression_method, file.compression_level)?;
+                .switch_to(compression_method, file.compression_level)?;
         }
 
         self.writing_to_extra_field = false;
@@ -974,7 +1068,7 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
                 )),
                 CompressionMethod::AES => {
                     return Err(ZipError::UnsupportedArchive(
-                        "AES compression is not supported for writing",
+                        "AES encryption is enabled through FileOptions::with_aes_encryption",
                     ))
                 }
                 #[cfg(feature = "zstd")]
@@ -1024,6 +1118,9 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
     fn get_plain(&mut self) -> &mut W {
         match *self {
             GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(ref mut w)) => w,
+            #[cfg(feature = "aes-crypto")]
+            GenericZipWriter::Storer(MaybeEncrypted::Aes(ref mut w)) => &mut w.writer,
+            GenericZipWriter::Storer(MaybeEncrypted::ZipCrypto(ref mut w)) => &mut w.writer,
             _ => panic!("Should have switched to stored and unencrypted beforehand"),
         }
     }
@@ -1328,6 +1425,66 @@ fn write_central_zip64_extra_field<T: Write>(writer: &mut T, file: &ZipFileData)
     Ok(size)
 }
 
+fn write_aes_extra_data(file: &mut ZipFileData, options: &FileOptions) -> ZipResult<()> {
+    match options.encrypt_with {
+        Some(EncryptWith::Aes { .. }) => {}
+        _ => return Ok(()),
+    };
+
+    file.aes_encryption_extra_data_start
+        .store(file.extra_field.len() as u64);
+
+    // We can't write the header right now due to encryption already being activated, but since we
+    // need to updated the vendor version field after we've finished we can just write out the
+    // whole header at that time, and so we just write out 11 bytes of zeroes for now.
+    file.extra_field.write_all(&[
+        0x01, 0x99, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ])?;
+
+    Ok(())
+}
+
+fn update_aes_extra_data<W: Write + io::Seek>(
+    writer: &mut W,
+    file: &mut ZipFileData,
+) -> ZipResult<()> {
+    let (aes_mode, compression_method) = match file.aes_mode {
+        Some((aes_mode, _, compression_method)) => (aes_mode, compression_method),
+        None => {
+            return Ok(());
+        }
+    };
+
+    let extra_data_start = file.aes_encryption_extra_data_start.load();
+    writer.seek(io::SeekFrom::Start(
+        file.extra_data_start.load() + extra_data_start,
+    ))?;
+
+    let mut buf = Vec::new();
+
+    // Extra field header ID.
+    buf.write_u16::<LittleEndian>(0x9901)?;
+    // Data size.
+    buf.write_u16::<LittleEndian>(7)?;
+    // Integer version number.
+    buf.write_u16::<LittleEndian>(AesVendorVersion::Ae2 as u16)?;
+    // Vendor ID.
+    buf.write_all(b"AE")?;
+    // AES encryption strength.
+    buf.write_u8(aes_mode as u8)?;
+    // Real compression method.
+    #[allow(deprecated)]
+    buf.write_u16::<LittleEndian>(compression_method.to_u16())?;
+
+    writer.write_all(&buf)?;
+    file.extra_field.splice(
+        extra_data_start as usize..(extra_data_start + 11) as usize,
+        buf.into_iter(),
+    );
+
+    Ok(())
+}
+
 fn path_to_string(path: &std::path::Path) -> String {
     let mut path_str = String::new();
     for component in path.components() {
@@ -1497,10 +1654,9 @@ mod test {
 }
 
 #[cfg(not(feature = "unreserved"))]
-const EXTRA_FIELD_MAPPING: [u16; 49] = [
+const EXTRA_FIELD_MAPPING: [u16; 48] = [
     0x0001, 0x0007, 0x0008, 0x0009, 0x000a, 0x000c, 0x000d, 0x000e, 0x000f, 0x0014, 0x0015, 0x0016,
     0x0017, 0x0018, 0x0019, 0x0020, 0x0021, 0x0022, 0x0023, 0x0065, 0x0066, 0x4690, 0x07c8, 0x2605,
     0x2705, 0x2805, 0x334d, 0x4341, 0x4453, 0x4704, 0x470f, 0x4b46, 0x4c41, 0x4d49, 0x4f4c, 0x5356,
-    0x5455, 0x554e, 0x5855, 0x6375, 0x6542, 0x7075, 0x756e, 0x7855, 0xa11e, 0xa220, 0xfd4a, 0x9901,
-    0x9902,
+    0x5455, 0x554e, 0x5855, 0x6375, 0x6542, 0x7075, 0x756e, 0x7855, 0xa11e, 0xa220, 0xfd4a, 0x9902,
 ];

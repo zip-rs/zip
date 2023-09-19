@@ -7,8 +7,6 @@ use std::path;
     target_arch = "powerpc"
 )))]
 use std::sync::atomic;
-#[cfg(not(feature = "time"))]
-use std::time::SystemTime;
 #[cfg(doc)]
 use {crate::read::ZipFile, crate::write::FileOptions};
 
@@ -342,6 +340,8 @@ pub struct ZipFileData {
     ///
     /// Note that when this is not known, it is set to 0
     pub central_header_start: u64,
+    /// Specifies where the extra data fields of the file start
+    pub extra_data_start: AtomicU64,
     /// Specifies where the compressed data of the file starts
     pub data_start: AtomicU64,
     /// External file attributes
@@ -349,7 +349,15 @@ pub struct ZipFileData {
     /// Reserve local ZIP64 extra field
     pub large_file: bool,
     /// AES mode if applicable
-    pub aes_mode: Option<(AesMode, AesVendorVersion)>,
+    pub aes_mode: Option<(
+        AesMode,
+        AesVendorVersion,
+        crate::compression::CompressionMethod,
+    )>,
+    /// Specifies where the AE-x extra data field starts
+    ///
+    /// Note that when this is not known, it is set to 0
+    pub aes_encryption_extra_data_start: AtomicU64,
 }
 
 impl ZipFileData {
@@ -444,25 +452,32 @@ impl ZipFileData {
 /// According to the [specification](https://www.winzip.com/win/en/aes_info.html#winzip11) AE-2
 /// does not make use of the CRC check.
 #[derive(Copy, Clone, Debug)]
+#[repr(u16)]
 pub enum AesVendorVersion {
-    Ae1,
-    Ae2,
+    Ae1 = 0x0001,
+    Ae2 = 0x0002,
 }
 
 /// AES variant used.
 #[derive(Copy, Clone, Debug)]
+#[repr(u8)]
 pub enum AesMode {
-    Aes128,
-    Aes192,
-    Aes256,
+    /// 128-bit AES encryption.
+    Aes128 = 0x01,
+    /// 192-bit AES encryption.
+    Aes192 = 0x02,
+    /// 256-bit AES encryption.
+    Aes256 = 0x03,
 }
 
 #[cfg(feature = "aes-crypto")]
 impl AesMode {
+    /// Length of the salt for the given AES mode.
     pub fn salt_length(&self) -> usize {
         self.key_length() / 2
     }
 
+    /// Length of the key for the given AES mode.
     pub fn key_length(&self) -> usize {
         match self {
             Self::Aes128 => 16,
@@ -503,11 +518,13 @@ mod test {
             extra_field: Vec::new(),
             file_comment: String::new(),
             header_start: 0,
+            extra_data_start: AtomicU64::new(0),
             data_start: AtomicU64::new(0),
             central_header_start: 0,
             external_attributes: 0,
             large_file: false,
             aes_mode: None,
+            aes_encryption_extra_data_start: AtomicU64::new(0),
         };
         assert_eq!(
             data.file_name_sanitized(),

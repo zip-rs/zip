@@ -213,7 +213,7 @@ fn make_crypto_reader<'a>(
     using_data_descriptor: bool,
     reader: io::Take<&'a mut dyn io::Read>,
     password: Option<&[u8]>,
-    aes_info: Option<(AesMode, AesVendorVersion)>,
+    aes_info: Option<(AesMode, AesVendorVersion, CompressionMethod)>,
     #[cfg(feature = "aes-crypto")] compressed_size: u64,
 ) -> ZipResult<Result<CryptoReader<'a>, InvalidPassword>> {
     #[allow(deprecated)]
@@ -231,7 +231,7 @@ fn make_crypto_reader<'a>(
             ))
         }
         #[cfg(feature = "aes-crypto")]
-        (Some(password), Some((aes_mode, vendor_version))) => {
+        (Some(password), Some((aes_mode, vendor_version, _))) => {
             match AesReader::new(reader, aes_mode, compressed_size).validate(password)? {
                 None => return Ok(Err(InvalidPassword)),
                 Some(r) => CryptoReader::Aes {
@@ -720,10 +720,12 @@ fn central_header_to_zip_file_inner<R: Read>(
         file_comment,
         header_start: offset,
         central_header_start,
+        extra_data_start: AtomicU64::new(0),
         data_start: AtomicU64::new(0),
         external_attributes: external_file_attributes,
         large_file: false,
         aes_mode: None,
+        aes_encryption_extra_data_start: AtomicU64::new(0),
     };
 
     match parse_extra_field(&mut result) {
@@ -782,7 +784,9 @@ fn parse_extra_field(file: &mut ZipFileData) -> ZipResult<()> {
                 let vendor_version = reader.read_u16::<LittleEndian>()?;
                 let vendor_id = reader.read_u16::<LittleEndian>()?;
                 let aes_mode = reader.read_u8()?;
-                let compression_method = reader.read_u16::<LittleEndian>()?;
+                #[allow(deprecated)]
+                let compression_method =
+                    CompressionMethod::from_u16(reader.read_u16::<LittleEndian>()?);
 
                 if vendor_id != 0x4541 {
                     return Err(ZipError::InvalidArchive("Invalid AES vendor"));
@@ -793,15 +797,18 @@ fn parse_extra_field(file: &mut ZipFileData) -> ZipResult<()> {
                     _ => return Err(ZipError::InvalidArchive("Invalid AES vendor version")),
                 };
                 match aes_mode {
-                    0x01 => file.aes_mode = Some((AesMode::Aes128, vendor_version)),
-                    0x02 => file.aes_mode = Some((AesMode::Aes192, vendor_version)),
-                    0x03 => file.aes_mode = Some((AesMode::Aes256, vendor_version)),
+                    0x01 => {
+                        file.aes_mode = Some((AesMode::Aes128, vendor_version, compression_method))
+                    }
+                    0x02 => {
+                        file.aes_mode = Some((AesMode::Aes192, vendor_version, compression_method))
+                    }
+                    0x03 => {
+                        file.aes_mode = Some((AesMode::Aes256, vendor_version, compression_method))
+                    }
                     _ => return Err(ZipError::InvalidArchive("Invalid AES encryption strength")),
                 };
-                file.compression_method = {
-                    #[allow(deprecated)]
-                    CompressionMethod::from_u16(compression_method)
-                };
+                file.compression_method = compression_method;
             }
             _ => {
                 // Other fields are ignored
@@ -1083,6 +1090,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         // header_start and data start are not available, but also don't matter, since seeking is
         // not available.
         header_start: 0,
+        extra_data_start: AtomicU64::new(0),
         data_start: AtomicU64::new(0),
         central_header_start: 0,
         // The external_attributes field is only available in the central directory.
@@ -1091,6 +1099,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         external_attributes: 0,
         large_file: false,
         aes_mode: None,
+        aes_encryption_extra_data_start: AtomicU64::new(0),
     };
 
     match parse_extra_field(&mut result) {

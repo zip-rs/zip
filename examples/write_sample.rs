@@ -1,5 +1,5 @@
 use std::io::prelude::*;
-use zip::write::FileOptions;
+use zip::{write::FileOptions, AesMode};
 
 fn main() {
     std::process::exit(real_main());
@@ -37,6 +37,16 @@ fn doit(filename: &str) -> zip::result::ZipResult<()> {
 
     zip.start_file("test/lorem_ipsum.txt", Default::default())?;
     zip.write_all(LOREM_IPSUM)?;
+
+    #[cfg(feature = "aes-crypto")]
+    {
+        zip.start_file(
+            "test/lorem_ipsum.aes.txt",
+            FileOptions::default()
+                .with_aes_encryption(AesMode::Aes256, "some really good password"),
+        )?;
+        zip.write_all(LOREM_IPSUM)?;
+    }
 
     zip.finish()?;
     Ok(())
