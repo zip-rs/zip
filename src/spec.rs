@@ -1,4 +1,6 @@
 use crate::result::{ZipError, ZipResult};
+#[cfg(doc)]
+use crate::write::{FileOptions, ZipWriter};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io;
 use std::io::prelude::*;
@@ -9,7 +11,47 @@ const CENTRAL_DIRECTORY_END_SIGNATURE: u32 = 0x06054b50;
 pub const ZIP64_CENTRAL_DIRECTORY_END_SIGNATURE: u32 = 0x06064b50;
 const ZIP64_CENTRAL_DIRECTORY_END_LOCATOR_SIGNATURE: u32 = 0x07064b50;
 
+/// The number of bytes necessary to allocate a zip64 record for an individual file.
+///
+/// If a file larger than this threshold attempts to be written, and [`FileOptions::large_file()`]
+/// was not true, then [`ZipWriter`] will raise an [`io::Error`] with [`io::ErrorKind::Other`].
+///
+/// If the zip file itself is larger than this value, then a zip64 central directory record will be
+/// written to the end of the file.
+///
+///```
+/// # fn main() -> Result<(), zip::result::ZipError> {
+/// use std::io::{self, Cursor, prelude::*};
+/// use zip::{ZipWriter, write::FileOptions};
+///
+/// let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+/// // Writing an extremely large file for this test is faster without compression.
+/// let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+///
+/// let big_len: usize = (zip::ZIP64_BYTES_THR as usize) + 1;
+/// let big_buf = vec![0u8; big_len];
+/// zip.start_file("zero.dat", options)?;
+/// // This is too big!
+/// assert!(zip.write_all(&big_buf[..]).is_err());
+/// // Attempting to write anything further to the same zip will fail.
+/// assert!(zip.start_file("one.dat", options).is_err());
+///
+/// // Create a new zip output.
+/// let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+/// // This time, create a zip64 record for the file.
+/// let options = options.large_file(true);
+/// zip.start_file("zero.dat", options)?;
+/// // This succeeds because we specified that it could be a large file.
+/// assert!(zip.write_all(&big_buf[..]).is_ok());
+/// # Ok(())
+/// # }
+///```
 pub const ZIP64_BYTES_THR: u64 = u32::MAX as u64;
+/// The number of entries within a single zip necessary to allocate a zip64 central
+/// directory record.
+///
+/// If more than this number of entries is written to a [`ZipWriter`], then [`ZipWriter::finish()`]
+/// will write out extra zip64 data to the end of the zip file.
 pub const ZIP64_ENTRY_THR: usize = u16::MAX as usize;
 
 pub struct CentralDirectoryEnd {

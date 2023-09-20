@@ -26,6 +26,7 @@
 
 pub use crate::compression::{CompressionMethod, SUPPORTED_COMPRESSION_METHODS};
 pub use crate::read::ZipArchive;
+pub use crate::spec::{ZIP64_BYTES_THR, ZIP64_ENTRY_THR};
 pub use crate::types::DateTime;
 pub use crate::write::ZipWriter;
 
