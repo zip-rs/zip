@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "read_metadata"
 harness = false
+
+[[bench]]
+name = "merge_archive"
+harness = false

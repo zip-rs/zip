@@ -455,6 +455,68 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         Ok(())
     }
 
+    /* TODO: link to/use Self::finish_into_readable() from https://github.com/zip-rs/zip/pull/400 in
+     * this docstring. */
+    /// Copy over the entire contents of another archive verbatim.
+    ///
+    /// This method extracts file metadata from the `source` archive, then simply performs a single
+    /// big [`io::copy()`](io::copy) to transfer all the actual file contents without any
+    /// decompression or decryption. This is more performant than the equivalent operation of
+    /// calling [`Self::raw_copy_file()`] for each entry from the `source` archive in sequence.
+    ///
+    ///```
+    /// # fn main() -> Result<(), zip::result::ZipError> {
+    /// use std::io::{Cursor, prelude::*};
+    /// use zip::{ZipArchive, ZipWriter, write::FileOptions};
+    ///
+    /// let buf = Cursor::new(Vec::new());
+    /// let mut zip = ZipWriter::new(buf);
+    /// zip.start_file("a.txt", FileOptions::default())?;
+    /// zip.write_all(b"hello\n")?;
+    /// let src = ZipArchive::new(zip.finish()?)?;
+    ///
+    /// let buf = Cursor::new(Vec::new());
+    /// let mut zip = ZipWriter::new(buf);
+    /// zip.start_file("b.txt", FileOptions::default())?;
+    /// zip.write_all(b"hey\n")?;
+    /// let src2 = ZipArchive::new(zip.finish()?)?;
+    ///
+    /// let buf = Cursor::new(Vec::new());
+    /// let mut zip = ZipWriter::new(buf);
+    /// zip.merge_archive(src)?;
+    /// zip.merge_archive(src2)?;
+    /// let mut result = ZipArchive::new(zip.finish()?)?;
+    ///
+    /// let mut s: String = String::new();
+    /// result.by_name("a.txt")?.read_to_string(&mut s)?;
+    /// assert_eq!(s, "hello\n");
+    /// s.clear();
+    /// result.by_name("b.txt")?.read_to_string(&mut s)?;
+    /// assert_eq!(s, "hey\n");
+    /// # Ok(())
+    /// # }
+    ///```
+    pub fn merge_archive<R>(&mut self, mut source: ZipArchive<R>) -> ZipResult<()>
+    where
+        R: Read + io::Seek,
+    {
+        self.finish_file()?;
+
+        /* Ensure we accept the file contents on faith (and avoid overwriting the data).
+         * See raw_copy_file_rename(). */
+        self.writing_to_file = true;
+        self.writing_raw = true;
+
+        let writer = self.inner.get_plain();
+        /* Get the file entries from the source archive. */
+        let new_files = source.merge_contents(writer)?;
+
+        /* These file entries are now ours! */
+        self.files.extend(new_files);
+
+        Ok(())
+    }
+
     /// Create a file in the archive and start writing its' contents.
     ///
     /// The data should be written using the [`io::Write`] implementation on this [`ZipWriter`]
