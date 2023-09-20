@@ -7,18 +7,6 @@ use std::io;
 /// Generic result type with ZipError as its error variant
 pub type ZipResult<T> = Result<T, ZipError>;
 
-/// The given password is wrong
-#[derive(Debug)]
-pub struct InvalidPassword;
-
-impl fmt::Display for InvalidPassword {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "invalid password for file in archive")
-    }
-}
-
-impl Error for InvalidPassword {}
-
 /// Error type for Zip
 #[derive(Debug)]
 pub enum ZipError {
@@ -33,6 +21,11 @@ pub enum ZipError {
 
     /// The requested file could not be found in the archive
     FileNotFound,
+
+    /// Invalid password for file in archive
+    #[cfg(feature = "aes-crypto")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "aes-crypto")))]
+    InvalidPassword,
 }
 
 impl From<io::Error> for ZipError {
@@ -48,6 +41,7 @@ impl fmt::Display for ZipError {
             ZipError::InvalidArchive(err) => write!(fmt, "invalid Zip archive: {err}"),
             ZipError::UnsupportedArchive(err) => write!(fmt, "unsupported Zip archive: {err}"),
             ZipError::FileNotFound => write!(fmt, "specified file not found in archive"),
+            ZipError::InvalidPassword => write!(fmt, "Invalid password for file in archive")
         }
     }
 }
@@ -73,6 +67,8 @@ impl ZipError {
     /// }
     /// # ()
     /// ```
+    #[cfg(feature = "aes-crypto")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "aes-crypto")))]
     pub const PASSWORD_REQUIRED: &'static str = "Password required to decrypt file";
 }
 
