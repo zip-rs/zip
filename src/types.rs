@@ -1,4 +1,5 @@
 //! Types that specify what is contained in a ZIP.
+use num_enum::{FromPrimitive, IntoPrimitive};
 use std::path;
 
 #[cfg(not(any(
@@ -54,23 +55,13 @@ use crate::result::DateTimeRangeError;
 #[cfg(feature = "time")]
 use time::{error::ComponentRange, Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
+#[repr(u8)]
 pub enum System {
     Dos = 0,
     Unix = 3,
+    #[num_enum(default)]
     Unknown,
-}
-
-impl System {
-    pub fn from_u8(system: u8) -> System {
-        use self::System::*;
-
-        match system {
-            0 => Dos,
-            3 => Unix,
-            _ => Unknown,
-        }
-    }
 }
 
 /// Representation of a moment in time.
@@ -477,10 +468,14 @@ mod test {
     #[test]
     fn system() {
         use super::System;
-        assert_eq!(System::Dos as u16, 0u16);
-        assert_eq!(System::Unix as u16, 3u16);
-        assert_eq!(System::from_u8(0), System::Dos);
-        assert_eq!(System::from_u8(3), System::Unix);
+        assert_eq!(u8::from(System::Dos), 0u8);
+        assert_eq!(System::Dos as u8, 0u8);
+        assert_eq!(System::Unix as u8, 3u8);
+        assert_eq!(u8::from(System::Unix), 3u8);
+        assert_eq!(System::from(0), System::Dos);
+        assert_eq!(System::from(3), System::Unix);
+        assert_eq!(u8::from(System::Unknown), 4u8);
+        assert_eq!(System::Unknown as u8, 4u8);
     }
 
     #[test]

@@ -701,7 +701,7 @@ fn central_header_to_zip_file_inner<R: Read>(
 
     // Construct the result
     let mut result = ZipFileData {
-        system: System::from_u8((version_made_by >> 8) as u8),
+        system: System::from((version_made_by >> 8) as u8),
         version_made_by: version_made_by as u8,
         encrypted,
         using_data_descriptor,
@@ -1066,7 +1066,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
     };
 
     let mut result = ZipFileData {
-        system: System::from_u8((version_made_by >> 8) as u8),
+        system: System::from((version_made_by >> 8) as u8),
         version_made_by: version_made_by as u8,
         encrypted,
         using_data_descriptor,
