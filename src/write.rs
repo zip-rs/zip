@@ -387,8 +387,8 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 crc32: raw_values.crc32,
                 compressed_size: raw_values.compressed_size,
                 uncompressed_size: raw_values.uncompressed_size,
-                file_name: name.into(),
-                file_name_raw: Vec::new(), // Never used for saving
+                file_name: String::new(), // Never used for saving
+                file_name_raw: name.into().bytes().collect(),
                 extra_field: Vec::new(),
                 file_comment: String::new(),
                 header_start,
@@ -1092,11 +1092,10 @@ fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipR
     // version needed to extract
     writer.write_u16::<LittleEndian>(file.version_needed())?;
     // general purpose bit flag
-    let flag = if !file.file_name.is_ascii() {
-        1u16 << 11
-    } else {
-        0
-    } | if file.encrypted { 1u16 << 0 } else { 0 };
+    let is_utf8 = std::str::from_utf8(&file.file_name_raw).is_ok();
+    let is_ascii = file.file_name_raw.is_ascii();
+    let flag = if is_utf8 && !is_ascii { 1u16 << 11 } else { 0 }
+        | if file.encrypted { 1u16 << 0 } else { 0 };
     writer.write_u16::<LittleEndian>(flag)?;
     // Compression method
     #[allow(deprecated)]
@@ -1115,12 +1114,12 @@ fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipR
         writer.write_u32::<LittleEndian>(file.uncompressed_size as u32)?;
     }
     // file name length
-    writer.write_u16::<LittleEndian>(file.file_name.as_bytes().len() as u16)?;
+    writer.write_u16::<LittleEndian>(file.file_name_raw.len() as u16)?;
     // extra field length
     let extra_field_length = if file.large_file { 20 } else { 0 } + file.extra_field.len() as u16;
     writer.write_u16::<LittleEndian>(extra_field_length)?;
     // file name
-    writer.write_all(file.file_name.as_bytes())?;
+    writer.write_all(&file.file_name_raw)?;
     // zip64 extra field
     if file.large_file {
         write_local_zip64_extra_field(writer, file)?;
@@ -1167,11 +1166,10 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
     // version needed to extract
     writer.write_u16::<LittleEndian>(file.version_needed())?;
     // general puprose bit flag
-    let flag = if !file.file_name.is_ascii() {
-        1u16 << 11
-    } else {
-        0
-    } | if file.encrypted { 1u16 << 0 } else { 0 };
+    let is_utf8 = std::str::from_utf8(&file.file_name_raw).is_ok();
+    let is_ascii = file.file_name_raw.is_ascii();
+    let flag = if is_utf8 && !is_ascii { 1u16 << 11 } else { 0 }
+        | if file.encrypted { 1u16 << 0 } else { 0 };
     writer.write_u16::<LittleEndian>(flag)?;
     // compression method
     #[allow(deprecated)]
@@ -1186,7 +1184,7 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
     // uncompressed size
     writer.write_u32::<LittleEndian>(file.uncompressed_size.min(spec::ZIP64_BYTES_THR) as u32)?;
     // file name length
-    writer.write_u16::<LittleEndian>(file.file_name.as_bytes().len() as u16)?;
+    writer.write_u16::<LittleEndian>(file.file_name_raw.len() as u16)?;
     // extra field length
     writer.write_u16::<LittleEndian>(zip64_extra_field_length + file.extra_field.len() as u16)?;
     // file comment length
@@ -1200,7 +1198,7 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
     // relative offset of local header
     writer.write_u32::<LittleEndian>(file.header_start.min(spec::ZIP64_BYTES_THR) as u32)?;
     // file name
-    writer.write_all(file.file_name.as_bytes())?;
+    writer.write_all(&file.file_name_raw)?;
     // zip64 extra field
     writer.write_all(&zip64_extra_field[..zip64_extra_field_length as usize])?;
     // extra field
@@ -1281,7 +1279,7 @@ fn update_local_zip64_extra_field<T: Write + io::Seek>(
     writer: &mut T,
     file: &ZipFileData,
 ) -> ZipResult<()> {
-    let zip64_extra_field = file.header_start + 30 + file.file_name.as_bytes().len() as u64;
+    let zip64_extra_field = file.header_start + 30 + file.file_name_raw.len() as u64;
     writer.seek(io::SeekFrom::Start(zip64_extra_field + 4))?;
     writer.write_u64::<LittleEndian>(file.uncompressed_size)?;
     writer.write_u64::<LittleEndian>(file.compressed_size)?;
@@ -1477,6 +1475,38 @@ mod test {
         assert_eq!(result.get_ref().len(), 153);
         let mut v = Vec::new();
         v.extend_from_slice(include_bytes!("../tests/data/mimetype.zip"));
+        assert_eq!(result.get_ref(), &v);
+    }
+
+    #[test]
+    fn write_non_utf8() {
+        let mut writer = ZipWriter::new(io::Cursor::new(Vec::new()));
+        let options = FileOptions {
+            compression_method: CompressionMethod::Stored,
+            compression_level: None,
+            last_modified_time: DateTime::default(),
+            permissions: Some(33188),
+            large_file: false,
+            encrypt_with: None,
+        };
+
+        // GB18030
+        // "中文" = [214, 208, 206, 196]
+        let filename = unsafe { String::from_utf8_unchecked(vec![214, 208, 206, 196]) };
+        writer.start_file(filename, options).unwrap();
+        writer.write_all(b"encoding GB18030").unwrap();
+
+        // SHIFT_JIS
+        // "日文" = [147, 250, 149, 182]
+        let filename = unsafe { String::from_utf8_unchecked(vec![147, 250, 149, 182]) };
+        writer.start_file(filename, options).unwrap();
+        writer.write_all(b"encoding SHIFT_JIS").unwrap();
+
+        let result = writer.finish().unwrap();
+        assert_eq!(result.get_ref().len(), 224);
+
+        let mut v = Vec::new();
+        v.extend_from_slice(include_bytes!("../tests/data/non_utf8.zip"));
         assert_eq!(result.get_ref(), &v);
     }
 
