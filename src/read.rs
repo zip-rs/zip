@@ -291,13 +291,41 @@ fn make_reader(
     }
 }
 
+impl<R> ZipArchive<R> {
+    pub(crate) fn from_finalized_writer(
+        files: Vec<ZipFileData>,
+        comment: Vec<u8>,
+        reader: R,
+    ) -> ZipResult<Self> {
+        if files.is_empty() {
+            return Err(ZipError::InvalidArchive(
+                "attempt to finalize empty zip writer into readable",
+            ));
+        }
+        /* This is where the whole file starts. */
+        let initial_offset = files[0].header_start;
+        let names_map: HashMap<String, usize> = files
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.file_name.clone(), i))
+            .collect();
+        let shared = Arc::new(zip_archive::Shared {
+            files,
+            names_map,
+            offset: initial_offset,
+            comment,
+        });
+        Ok(Self { reader, shared })
+    }
+}
+
 impl<R: Read + io::Seek> ZipArchive<R> {
     /// Get the directory start offset and number of files. This is done in a
     /// separate function to ease the control flow design.
     pub(crate) fn get_directory_counts(
         reader: &mut R,
         footer: &spec::CentralDirectoryEnd,
-        cde_start_pos: u64,
+        cde_end_pos: u64,
     ) -> ZipResult<(u64, u64, usize)> {
         // See if there's a ZIP64 footer. The ZIP64 locator if present will
         // have its signature 20 bytes in front of the standard footer. The
@@ -332,7 +360,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
                 // offsets all being too small. Get the amount of error by comparing
                 // the actual file position we found the CDE at with the offset
                 // recorded in the CDE.
-                let archive_offset = cde_start_pos
+                let archive_offset = cde_end_pos
                     .checked_sub(footer.central_directory_size as u64)
                     .and_then(|x| x.checked_sub(footer.central_directory_offset as u64))
                     .ok_or(ZipError::InvalidArchive(
@@ -362,7 +390,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
                 // read::CentralDirectoryEnd::find_and_parse, except now we search
                 // forward.
 
-                let search_upper_bound = cde_start_pos
+                let search_upper_bound = cde_end_pos
                     .checked_sub(60) // minimum size of Zip64CentralDirectoryEnd + Zip64CentralDirectoryEndLocator
                     .ok_or(ZipError::InvalidArchive(
                         "File cannot contain ZIP64 central directory end",
@@ -399,18 +427,18 @@ impl<R: Read + io::Seek> ZipArchive<R> {
     ///
     /// This uses the central directory record of the ZIP file, and ignores local file headers
     pub fn new(mut reader: R) -> ZipResult<ZipArchive<R>> {
-        let (footer, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut reader)?;
+        let (footer, cde_end_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut reader)?;
 
         if !footer.record_too_small() && footer.disk_number != footer.disk_with_central_directory {
             return unsupported_zip_error("Support for multi-disk files is not implemented");
         }
 
         let (archive_offset, directory_start, number_of_files) =
-            Self::get_directory_counts(&mut reader, &footer, cde_start_pos)?;
+            Self::get_directory_counts(&mut reader, &footer, cde_end_pos)?;
 
         // If the parsed number of files is greater than the offset then
         // something fishy is going on and we shouldn't trust number_of_files.
-        let file_capacity = if number_of_files > cde_start_pos as usize {
+        let file_capacity = if number_of_files > directory_start as usize {
             0
         } else {
             number_of_files
