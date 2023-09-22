@@ -2,6 +2,7 @@
 use std::path;
 
 #[cfg(not(any(
+    target_pointer_width = "32",
     all(target_arch = "arm", target_pointer_width = "32"),
     target_arch = "mips",
     target_arch = "powerpc"
@@ -18,6 +19,7 @@ mod ffi {
 }
 
 #[cfg(any(
+    target_pointer_width = "32",
     all(target_arch = "arm", target_pointer_width = "32"),
     target_arch = "mips",
     target_arch = "powerpc"
