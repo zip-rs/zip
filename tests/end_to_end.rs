@@ -1,4 +1,3 @@
-use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::HashSet;
 use std::io::prelude::*;
 use std::io::{Cursor, Seek};
@@ -102,8 +101,8 @@ fn write_test_archive(
     zip.write_all(b"Hello, World!\n")?;
 
     zip.start_file_with_extra_data("test_with_extra_data/🐢.txt", options)?;
-    zip.write_u16::<LittleEndian>(0xbeef)?;
-    zip.write_u16::<LittleEndian>(EXTRA_DATA.len() as u16)?;
+    zip.write_all(&0xbeefu16.to_le_bytes())?;
+    zip.write_all(&(EXTRA_DATA.len() as u16).to_le_bytes())?;
     zip.write_all(EXTRA_DATA)?;
     zip.end_extra_data()?;
     zip.write_all(b"Hello, World! Again.\n")?;
@@ -136,8 +135,8 @@ fn check_test_archive<R: Read + Seek>(zip_file: R) -> zip::result::ZipResult<zip
     {
         let file_with_extra_data = archive.by_name("test_with_extra_data/🐢.txt")?;
         let mut extra_data = Vec::new();
-        extra_data.write_u16::<LittleEndian>(0xbeef)?;
-        extra_data.write_u16::<LittleEndian>(EXTRA_DATA.len() as u16)?;
+        extra_data.write_all(&0xbeefu16.to_le_bytes())?;
+        extra_data.write_all(&(EXTRA_DATA.len() as u16).to_le_bytes())?;
         extra_data.write_all(EXTRA_DATA)?;
         assert_eq!(file_with_extra_data.extra_data(), extra_data.as_slice());
     }
