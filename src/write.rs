@@ -353,6 +353,22 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         self.comment = comment;
     }
 
+    /// Set the file length and crc32 manually.
+    ///
+    /// WARNING: This overwrites the internal crc32 calculation. It should only be used in case
+    /// the underlying [Write] is written independently and you need to adjust the zip metadata.
+    pub fn set_file_metadata(&mut self, length: u64, crc32: u32) -> ZipResult<()> {
+        if !self.writing_to_file {
+            return Err(ZipError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                "No file has been started",
+            )));
+        }
+        self.stats.hasher = crc32fast::Hasher::new_with_initial_len(crc32, length);
+        self.stats.bytes_written = length;
+        Ok(())
+    }
+
     /// Start a new file for with the requested options.
     fn start_entry<S>(
         &mut self,
