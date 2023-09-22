@@ -19,7 +19,8 @@ use std::sync::Arc;
 #[cfg(any(
     feature = "deflate",
     feature = "deflate-miniz",
-    feature = "deflate-zlib"
+    feature = "deflate-zlib",
+    feature = "deflate-zlib-ng",
 ))]
 use flate2::read::DeflateDecoder;
 
@@ -126,7 +127,8 @@ enum ZipFileReader<'a> {
     #[cfg(any(
         feature = "deflate",
         feature = "deflate-miniz",
-        feature = "deflate-zlib"
+        feature = "deflate-zlib",
+        feature = "deflate-zlib-ng",
     ))]
     Deflated(Crc32Reader<flate2::read::DeflateDecoder<CryptoReader<'a>>>),
     #[cfg(feature = "bzip2")]
@@ -144,7 +146,8 @@ impl<'a> Read for ZipFileReader<'a> {
             #[cfg(any(
                 feature = "deflate",
                 feature = "deflate-miniz",
-                feature = "deflate-zlib"
+                feature = "deflate-zlib",
+                feature = "deflate-zlib-ng",
             ))]
             ZipFileReader::Deflated(r) => r.read(buf),
             #[cfg(feature = "bzip2")]
@@ -165,7 +168,8 @@ impl<'a> ZipFileReader<'a> {
             #[cfg(any(
                 feature = "deflate",
                 feature = "deflate-miniz",
-                feature = "deflate-zlib"
+                feature = "deflate-zlib",
+                feature = "deflate-zlib-ng",
             ))]
             ZipFileReader::Deflated(r) => r.into_inner().into_inner().into_inner(),
             #[cfg(feature = "bzip2")]
@@ -271,7 +275,8 @@ fn make_reader(
         #[cfg(any(
             feature = "deflate",
             feature = "deflate-miniz",
-            feature = "deflate-zlib"
+            feature = "deflate-zlib",
+            feature = "deflate-zlib-ng",
         ))]
         CompressionMethod::Deflated => {
             let deflate_reader = DeflateDecoder::new(reader);
