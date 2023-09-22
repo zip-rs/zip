@@ -10,6 +10,7 @@ use crate::spec;
 use crate::types::{AesMode, AesVendorVersion, AtomicU64, DateTime, System, ZipFileData};
 use crate::zipcrypto::{ZipCryptoReader, ZipCryptoReaderValid, ZipCryptoValidator};
 use byteorder::{LittleEndian, ReadBytesExt};
+use cfg_if::cfg_if;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, prelude::*};
@@ -106,16 +107,19 @@ impl<'a> CryptoReader<'a> {
 
     /// Returns `true` if the data is encrypted using AE2.
     pub fn is_ae2_encrypted(&self) -> bool {
-        #[cfg(feature = "aes-crypto")]
-        return matches!(
-            self,
-            CryptoReader::Aes {
-                vendor_version: AesVendorVersion::Ae2,
-                ..
+        cfg_if! {
+            if #[cfg(feature = "aes-crypto")] {
+                return matches!(
+                    self,
+                    CryptoReader::Aes {
+                        vendor_version: AesVendorVersion::Ae2,
+                        ..
+                    }
+                );
+            } else {
+                false
             }
-        );
-        #[cfg(not(feature = "aes-crypto"))]
-        false
+        }
     }
 }
 
@@ -224,20 +228,21 @@ fn make_crypto_reader<'a>(
     }
 
     let reader = match (password, aes_info) {
-        #[cfg(not(feature = "aes-crypto"))]
-        (Some(_), Some(_)) => {
-            return Err(ZipError::UnsupportedArchive(
-                "AES encrypted files cannot be decrypted without the aes-crypto feature.",
-            ))
-        }
-        #[cfg(feature = "aes-crypto")]
         (Some(password), Some((aes_mode, vendor_version))) => {
-            match AesReader::new(reader, aes_mode, compressed_size).validate(password)? {
-                None => return Ok(Err(InvalidPassword)),
-                Some(r) => CryptoReader::Aes {
-                    reader: r,
-                    vendor_version,
-                },
+            cfg_if! {
+                if #[cfg(feature = "aes-crypto")] {
+                    match AesReader::new(reader, aes_mode, compressed_size).validate(password)? {
+                        None => return Ok(Err(InvalidPassword)),
+                        Some(r) => CryptoReader::Aes {
+                            reader: r,
+                            vendor_version,
+                        },
+                    }
+                } else {
+                    return Err(ZipError::UnsupportedArchive(
+                        "AES encrypted files cannot be decrypted without the aes-crypto feature.",
+                    ))
+                }
             }
         }
         (Some(password), None) => {

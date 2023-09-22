@@ -6,6 +6,7 @@ use crate::result::{ZipError, ZipResult};
 use crate::spec;
 use crate::types::{AtomicU64, DateTime, System, ZipFileData, DEFAULT_VERSION};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use cfg_if::cfg_if;
 use crc32fast::Hasher;
 use std::convert::TryInto;
 use std::default::Default;
@@ -199,24 +200,28 @@ impl FileOptions {
 impl Default for FileOptions {
     /// Construct a new FileOptions object
     fn default() -> Self {
+        cfg_if! {
+                if #[cfg(any(
+                    feature = "deflate",
+                    feature = "deflate-miniz",
+                    feature = "deflate-zlib"
+                ))] {
+                    let compression_method = CompressionMethod::Deflated;
+                } else {
+                    let compression_method = CompressionMethod::Stored;
+                }
+        }
+        cfg_if! {
+            if #[cfg(feature = "time")] {
+                let last_modified_time = OffsetDateTime::now_utc().try_into().unwrap_or_default();
+            } else {
+                let last_modified_time = DateTime::default();
+            }
+        }
         Self {
-            #[cfg(any(
-                feature = "deflate",
-                feature = "deflate-miniz",
-                feature = "deflate-zlib"
-            ))]
-            compression_method: CompressionMethod::Deflated,
-            #[cfg(not(any(
-                feature = "deflate",
-                feature = "deflate-miniz",
-                feature = "deflate-zlib"
-            )))]
-            compression_method: CompressionMethod::Stored,
+            compression_method,
             compression_level: None,
-            #[cfg(feature = "time")]
-            last_modified_time: OffsetDateTime::now_utc().try_into().unwrap_or_default(),
-            #[cfg(not(feature = "time"))]
-            last_modified_time: DateTime::default(),
+            last_modified_time,
             permissions: None,
             large_file: false,
             encrypt_with: None,
