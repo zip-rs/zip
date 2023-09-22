@@ -80,7 +80,7 @@ pub(crate) mod zip_writer {
     /// let mut buf = [0; 65536];
     /// let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf[..]));
     ///
-    /// let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    /// let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
     /// zip.start_file("hello_world.txt", options)?;
     /// zip.write(b"Hello, World!")?;
     ///
