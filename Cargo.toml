@@ -14,7 +14,7 @@ rust-version = "1.59.0"
 [dependencies]
 aes = { version = "0.8.2", optional = true }
 byteorder = "1.4.3"
-bzip2 = { version = "0.4.3", optional = true }
+bzip2 = { version = "0.4.4", optional = true }
 constant_time_eq = { version = "0.1.5", optional = true }
 crc32fast = "1.3.2"
 flate2 = { version = "1.0.23", default-features = false, optional = true }
