@@ -12,7 +12,7 @@ use crate::zipcrypto::{ZipCryptoReader, ZipCryptoReaderValid, ZipCryptoValidator
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{self, prelude::*};
+use std::io::{self, prelude::*, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -52,6 +52,7 @@ pub(crate) mod zip_archive {
     /// ```no_run
     /// use std::io::prelude::*;
     /// fn list_zip_contents(reader: impl Read + Seek) -> zip::result::ZipResult<()> {
+    ///     use zip::HasZipMetadata;
     ///     let mut zip = zip::ZipArchive::new(reader)?;
     ///
     ///     for i in 0..zip.len() {
@@ -183,6 +184,65 @@ pub struct ZipFile<'a> {
     reader: ZipFileReader<'a>,
 }
 
+/// A struct for reading and seeking a zip file
+pub struct ZipFileSeek<'a, R> {
+    data: Cow<'a, ZipFileData>,
+    reader: ZipFileSeekReader<'a, R>,
+}
+
+enum ZipFileSeekReader<'a, R> {
+    Raw(SeekableTake<'a, R>),
+}
+
+struct SeekableTake<'a, R> {
+    inner: &'a mut R,
+    inner_starting_offset: u64,
+    length: u64,
+    current_offset: u64,
+}
+
+
+impl <'a, R: Seek> SeekableTake<'a, R> {
+    pub fn new(inner: &'a mut R, length: u64) -> io::Result<Self> {
+        let inner_starting_offset = inner.seek(SeekFrom::Current(0))?;
+        Ok(Self {
+            inner,
+            inner_starting_offset,
+            length,
+            current_offset: 0
+        })
+    }
+}
+
+impl <'a, R: Seek> Seek for SeekableTake<'a, R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let offset = match pos {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::End(offset) => self.length.checked_add_signed(offset),
+            SeekFrom::Current(offset) => self.current_offset.checked_add_signed(offset),
+        };
+        match offset {
+            None => {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid seek to a negative or overflowing position"))
+            }
+            Some(offset) => {
+                let clamped_offset = std::cmp::min(self.length, offset);
+                let new_inner_offset = self.inner.seek(SeekFrom::Start(self.inner_starting_offset + clamped_offset))?;
+                self.current_offset = new_inner_offset - self.inner_starting_offset;
+                Ok(new_inner_offset)
+            }
+        }
+    }
+}
+
+impl <'a, R: Read> Read for SeekableTake<'a, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let written = self.inner.take(self.length - self.current_offset).read(buf)?;
+        self.current_offset += written as u64;
+        Ok(written)
+    }
+}
+
 fn find_content<'a>(
     data: &ZipFileData,
     reader: &'a mut (impl Read + Seek),
@@ -203,6 +263,29 @@ fn find_content<'a>(
 
     reader.seek(io::SeekFrom::Start(data_start))?;
     Ok((reader as &mut dyn Read).take(data.compressed_size))
+}
+
+fn find_content_seek<'a, R: Read + Seek>(
+    data: &ZipFileData,
+    reader: &'a mut R,
+) -> ZipResult<SeekableTake<'a, R>> {
+    // Parse local header
+    reader.seek(io::SeekFrom::Start(data.header_start))?;
+    let signature = reader.read_u32::<LittleEndian>()?;
+    if signature != spec::LOCAL_FILE_HEADER_SIGNATURE {
+        return Err(ZipError::InvalidArchive("Invalid local file header"));
+    }
+
+    reader.seek(io::SeekFrom::Current(22))?;
+    let file_name_length = reader.read_u16::<LittleEndian>()? as u64;
+    let extra_field_length = reader.read_u16::<LittleEndian>()? as u64;
+    let magic_and_header = 4 + 22 + 2 + 2;
+    let data_start = data.header_start + magic_and_header + file_name_length + extra_field_length;
+    data.data_start.store(data_start);
+
+    reader.seek(io::SeekFrom::Start(data_start))?;
+
+    Ok(SeekableTake::new(reader, data.compressed_size)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -533,6 +616,40 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         Ok(self.by_name_with_optional_password(name, None)?.unwrap())
     }
 
+    /// Search for a file entry by name and return a seekable object.
+    pub fn by_name_seek(&mut self, name: &str) -> ZipResult<ZipFileSeek<R>> {
+        let index = match self.shared.names_map.get(name) {
+            Some(index) => *index,
+            None => {
+                return Err(ZipError::FileNotFound);
+            }
+        };
+        self.by_index_seek(index)
+    }
+
+    /// Search for a file entry by index and return a seekable object.
+    pub fn by_index_seek(&mut self, index: usize) -> ZipResult<ZipFileSeek<R>> {
+        let reader = &mut self.reader;
+        self.shared
+            .files
+            .get(index)
+            .ok_or(ZipError::FileNotFound)
+            .and_then(move |data| {
+                let seek_reader = match data.compression_method {
+                    CompressionMethod::Stored => {
+                        ZipFileSeekReader::Raw(find_content_seek(data, reader)?)
+                    }
+                    _ => {
+                        return Err(ZipError::UnsupportedArchive("Seekable compressed files are not yet supported"))
+                    }
+                };
+                Ok(ZipFileSeek {
+                    reader: seek_reader,
+                    data: Cow::Borrowed(data),
+                })
+            })
+    }
+
     fn by_name_with_optional_password<'a>(
         &'a mut self,
         name: &str,
@@ -816,6 +933,151 @@ fn parse_extra_field(file: &mut ZipFileData) -> ZipResult<()> {
     Ok(())
 }
 
+/// A trait for exposing file metadata inside the zip.
+pub trait HasZipMetadata {
+    /// Get the file metadata
+    fn get_metadata(&self) -> &ZipFileData;
+
+    /// Get the version of the file
+    fn version_made_by(&self) -> (u8, u8) {
+        (
+            self.get_metadata().version_made_by / 10,
+            self.get_metadata().version_made_by % 10,
+        )
+    }
+
+    /// Get the name of the file
+    ///
+    /// # Warnings
+    ///
+    /// It is dangerous to use this name directly when extracting an archive.
+    /// It may contain an absolute path (`/etc/shadow`), or break out of the
+    /// current directory (`../runtime`). Carelessly writing to these paths
+    /// allows an attacker to craft a ZIP archive that will overwrite critical
+    /// files.
+    ///
+    /// You can use the [`ZipFile::enclosed_name`] method to validate the name
+    /// as a safe path.
+    fn name(&self) -> &str {
+        &self.get_metadata().file_name
+    }
+
+    /// Get the name of the file, in the raw (internal) byte representation.
+    ///
+    /// The encoding of this data is currently undefined.
+    fn name_raw(&self) -> &[u8] {
+        &self.get_metadata().file_name_raw
+    }
+
+    /// Get the name of the file in a sanitized form. It truncates the name to the first NULL byte,
+    /// removes a leading '/' and removes '..' parts.
+    #[deprecated(
+        since = "0.5.7",
+        note = "by stripping `..`s from the path, the meaning of paths can change.
+                `mangled_name` can be used if this behaviour is desirable"
+    )]
+    fn sanitized_name(&self) -> ::std::path::PathBuf {
+        self.mangled_name()
+    }
+
+    /// Rewrite the path, ignoring any path components with special meaning.
+    ///
+    /// - Absolute paths are made relative
+    /// - [`ParentDir`]s are ignored
+    /// - Truncates the filename at a NULL byte
+    ///
+    /// This is appropriate if you need to be able to extract *something* from
+    /// any archive, but will easily misrepresent trivial paths like
+    /// `foo/../bar` as `foo/bar` (instead of `bar`). Because of this,
+    /// [`ZipFile::enclosed_name`] is the better option in most scenarios.
+    ///
+    /// [`ParentDir`]: `Component::ParentDir`
+    fn mangled_name(&self) -> ::std::path::PathBuf {
+        self.get_metadata().file_name_sanitized()
+    }
+
+    /// Ensure the file path is safe to use as a [`Path`].
+    ///
+    /// - It can't contain NULL bytes
+    /// - It can't resolve to a path outside the current directory
+    ///   > `foo/../bar` is fine, `foo/../../bar` is not.
+    /// - It can't be an absolute path
+    ///
+    /// This will read well-formed ZIP files correctly, and is resistant
+    /// to path-based exploits. It is recommended over
+    /// [`ZipFile::mangled_name`].
+    fn enclosed_name(&self) -> Option<&Path> {
+        self.get_metadata().enclosed_name()
+    }
+
+    /// Get the comment of the file
+    fn comment(&self) -> &str {
+        &self.get_metadata().file_comment
+    }
+
+    /// Get the compression method used to store the file
+    fn compression(&self) -> CompressionMethod {
+        self.get_metadata().compression_method
+    }
+
+    /// Get the size of the file, in bytes, in the archive
+    fn compressed_size(&self) -> u64 {
+        self.get_metadata().compressed_size
+    }
+
+    /// Get the size of the file, in bytes, when uncompressed
+    fn size(&self) -> u64 {
+        self.get_metadata().uncompressed_size
+    }
+
+    /// Get the time the file was last modified
+    fn last_modified(&self) -> DateTime {
+        self.get_metadata().last_modified_time
+    }
+    /// Returns whether the file is actually a directory
+    fn is_dir(&self) -> bool {
+        self.name()
+            .chars()
+            .rev()
+            .next()
+            .map_or(false, |c| c == '/' || c == '\\')
+    }
+
+    /// Returns whether the file is a regular file
+    fn is_file(&self) -> bool {
+        !self.is_dir()
+    }
+
+    /// Get unix mode for the file
+    fn unix_mode(&self) -> Option<u32> {
+        self.get_metadata().unix_mode()
+    }
+
+    /// Get the CRC32 hash of the original file
+    fn crc32(&self) -> u32 {
+        self.get_metadata().crc32
+    }
+
+    /// Get the extra data of the zip header for this file
+    fn extra_data(&self) -> &[u8] {
+        &self.get_metadata().extra_field
+    }
+
+    /// Get the starting offset of the data of the compressed file
+    fn data_start(&self) -> u64 {
+        self.get_metadata().data_start.load()
+    }
+
+    /// Get the starting offset of the zip header for this file
+    fn header_start(&self) -> u64 {
+        self.get_metadata().header_start
+    }
+    /// Get the starting offset of the zip header in the central directory for this file
+    fn central_header_start(&self) -> u64 {
+        self.get_metadata().central_header_start
+    }
+}
+
 /// Methods for retrieving information on zip files
 impl<'a> ZipFile<'a> {
     fn get_reader(&mut self) -> &mut ZipFileReader<'a> {
@@ -834,150 +1096,39 @@ impl<'a> ZipFile<'a> {
         }
         &mut self.reader
     }
+}
 
-    /// Get the version of the file
-    pub fn version_made_by(&self) -> (u8, u8) {
-        (
-            self.data.version_made_by / 10,
-            self.data.version_made_by % 10,
-        )
-    }
-
-    /// Get the name of the file
-    ///
-    /// # Warnings
-    ///
-    /// It is dangerous to use this name directly when extracting an archive.
-    /// It may contain an absolute path (`/etc/shadow`), or break out of the
-    /// current directory (`../runtime`). Carelessly writing to these paths
-    /// allows an attacker to craft a ZIP archive that will overwrite critical
-    /// files.
-    ///
-    /// You can use the [`ZipFile::enclosed_name`] method to validate the name
-    /// as a safe path.
-    pub fn name(&self) -> &str {
-        &self.data.file_name
-    }
-
-    /// Get the name of the file, in the raw (internal) byte representation.
-    ///
-    /// The encoding of this data is currently undefined.
-    pub fn name_raw(&self) -> &[u8] {
-        &self.data.file_name_raw
-    }
-
-    /// Get the name of the file in a sanitized form. It truncates the name to the first NULL byte,
-    /// removes a leading '/' and removes '..' parts.
-    #[deprecated(
-        since = "0.5.7",
-        note = "by stripping `..`s from the path, the meaning of paths can change.
-                `mangled_name` can be used if this behaviour is desirable"
-    )]
-    pub fn sanitized_name(&self) -> ::std::path::PathBuf {
-        self.mangled_name()
-    }
-
-    /// Rewrite the path, ignoring any path components with special meaning.
-    ///
-    /// - Absolute paths are made relative
-    /// - [`ParentDir`]s are ignored
-    /// - Truncates the filename at a NULL byte
-    ///
-    /// This is appropriate if you need to be able to extract *something* from
-    /// any archive, but will easily misrepresent trivial paths like
-    /// `foo/../bar` as `foo/bar` (instead of `bar`). Because of this,
-    /// [`ZipFile::enclosed_name`] is the better option in most scenarios.
-    ///
-    /// [`ParentDir`]: `Component::ParentDir`
-    pub fn mangled_name(&self) -> ::std::path::PathBuf {
-        self.data.file_name_sanitized()
-    }
-
-    /// Ensure the file path is safe to use as a [`Path`].
-    ///
-    /// - It can't contain NULL bytes
-    /// - It can't resolve to a path outside the current directory
-    ///   > `foo/../bar` is fine, `foo/../../bar` is not.
-    /// - It can't be an absolute path
-    ///
-    /// This will read well-formed ZIP files correctly, and is resistant
-    /// to path-based exploits. It is recommended over
-    /// [`ZipFile::mangled_name`].
-    pub fn enclosed_name(&self) -> Option<&Path> {
-        self.data.enclosed_name()
-    }
-
-    /// Get the comment of the file
-    pub fn comment(&self) -> &str {
-        &self.data.file_comment
-    }
-
-    /// Get the compression method used to store the file
-    pub fn compression(&self) -> CompressionMethod {
-        self.data.compression_method
-    }
-
-    /// Get the size of the file, in bytes, in the archive
-    pub fn compressed_size(&self) -> u64 {
-        self.data.compressed_size
-    }
-
-    /// Get the size of the file, in bytes, when uncompressed
-    pub fn size(&self) -> u64 {
-        self.data.uncompressed_size
-    }
-
-    /// Get the time the file was last modified
-    pub fn last_modified(&self) -> DateTime {
-        self.data.last_modified_time
-    }
-    /// Returns whether the file is actually a directory
-    pub fn is_dir(&self) -> bool {
-        self.name()
-            .chars()
-            .rev()
-            .next()
-            .map_or(false, |c| c == '/' || c == '\\')
-    }
-
-    /// Returns whether the file is a regular file
-    pub fn is_file(&self) -> bool {
-        !self.is_dir()
-    }
-
-    /// Get unix mode for the file
-    pub fn unix_mode(&self) -> Option<u32> {
-        self.data.unix_mode()
-    }
-
-    /// Get the CRC32 hash of the original file
-    pub fn crc32(&self) -> u32 {
-        self.data.crc32
-    }
-
-    /// Get the extra data of the zip header for this file
-    pub fn extra_data(&self) -> &[u8] {
-        &self.data.extra_field
-    }
-
-    /// Get the starting offset of the data of the compressed file
-    pub fn data_start(&self) -> u64 {
-        self.data.data_start.load()
-    }
-
-    /// Get the starting offset of the zip header for this file
-    pub fn header_start(&self) -> u64 {
-        self.data.header_start
-    }
-    /// Get the starting offset of the zip header in the central directory for this file
-    pub fn central_header_start(&self) -> u64 {
-        self.data.central_header_start
+impl <'a> HasZipMetadata for ZipFile<'a> {
+    fn get_metadata(&self) -> &ZipFileData {
+        self.data.as_ref()
     }
 }
 
 impl<'a> Read for ZipFile<'a> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.get_reader().read(buf)
+    }
+}
+
+impl <'a, R: Read> Read for ZipFileSeek<'a, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match &mut self.reader {
+            ZipFileSeekReader::Raw(r) => r.read(buf),
+        }
+    }
+}
+
+impl <'a, R: Seek> Seek for ZipFileSeek<'a, R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match &mut self.reader {
+            ZipFileSeekReader::Raw(r) => r.seek(pos),
+        }
+    }
+}
+
+impl <'a, R> HasZipMetadata for ZipFileSeek<'a, R> {
+    fn get_metadata(&self) -> &ZipFileData {
+        self.data.as_ref()
     }
 }
 
@@ -1167,6 +1318,7 @@ mod test {
     #[test]
     fn zip_contents() {
         use super::ZipArchive;
+        use super::HasZipMetadata;
         use std::io;
 
         let mut v = Vec::new();
@@ -1194,6 +1346,7 @@ mod test {
     #[test]
     fn zip_clone() {
         use super::ZipArchive;
+        use super::HasZipMetadata;
         use std::io::{self, Read};
 
         let mut v = Vec::new();
@@ -1235,6 +1388,7 @@ mod test {
     #[test]
     fn file_and_dir_predicates() {
         use super::ZipArchive;
+        use super::HasZipMetadata;
         use std::io;
 
         let mut v = Vec::new();

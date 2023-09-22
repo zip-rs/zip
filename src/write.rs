@@ -1,13 +1,12 @@
 //! Types for creating ZIP archives
 
 use crate::compression::CompressionMethod;
-use crate::read::{central_header_to_zip_file, ZipArchive, ZipFile};
+use crate::read::{central_header_to_zip_file, ZipArchive, ZipFile, HasZipMetadata};
 use crate::result::{ZipError, ZipResult};
 use crate::spec;
 use crate::types::{AtomicU64, DateTime, System, ZipFileData, DEFAULT_VERSION};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
-use std::convert::TryInto;
 use std::default::Default;
 use std::io;
 use std::io::prelude::*;
@@ -531,7 +530,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     ///
     /// ```
     /// use byteorder::{LittleEndian, WriteBytesExt};
-    /// use zip::{ZipArchive, ZipWriter, result::ZipResult};
+    /// use zip::{ZipArchive, ZipWriter, result::ZipResult, HasZipMetadata};
     /// use zip::{write::FileOptions, CompressionMethod};
     /// use std::io::{Write, Cursor};
     ///
