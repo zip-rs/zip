@@ -917,6 +917,11 @@ impl<'a> ZipFile<'a> {
         self.data.compression_method
     }
 
+    /// Get if the files is encrypted or not
+    pub fn encrypted(&self) -> bool {
+        self.data.encrypted
+    }
+
     /// Get the size of the file, in bytes, in the archive
     pub fn compressed_size(&self) -> u64 {
         self.data.compressed_size
