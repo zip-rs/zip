@@ -11,6 +11,9 @@ use zip::{CompressionMethod, SUPPORTED_COMPRESSION_METHODS};
 #[test]
 fn end_to_end() {
     for &method in SUPPORTED_COMPRESSION_METHODS {
+        if method == CompressionMethod::DEFLATE64 {
+            continue
+        }
         let file = &mut Cursor::new(Vec::new());
 
         println!("Writing file with {method} compression");
@@ -26,6 +29,9 @@ fn end_to_end() {
 #[test]
 fn copy() {
     for &method in SUPPORTED_COMPRESSION_METHODS {
+        if method == CompressionMethod::DEFLATE64 {
+            continue
+        }
         let src_file = &mut Cursor::new(Vec::new());
         write_test_archive(src_file, method).expect("Couldn't write to test file");
 
@@ -65,6 +71,9 @@ fn copy() {
 #[test]
 fn append() {
     for &method in SUPPORTED_COMPRESSION_METHODS {
+        if method == CompressionMethod::DEFLATE64 {
+            continue
+        }
         let mut file = &mut Cursor::new(Vec::new());
         write_test_archive(file, method).expect("Couldn't write to test file");
 

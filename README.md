@@ -17,6 +17,7 @@ Supported compression formats:
 
 * stored (i.e. none)
 * deflate
+* deflate64 (decompression only)
 * bzip2
 * zstd
 
@@ -46,6 +47,7 @@ The features available are:
 
 * `aes-crypto`: Enables decryption of files which were encrypted with AES. Supports AE-1 and AE-2 methods.
 * `deflate`: Enables the deflate compression algorithm, which is the default for zip files.
+* `deflate64`: Enables the deflate64 compression algorithm. Decompression is only supported.
 * `bzip2`: Enables the BZip2 compression algorithm.
 * `time`: Enables features using the [time](https://github.com/rust-lang-deprecated/time) crate.
 * `zstd`: Enables the Zstandard compression algorithm.

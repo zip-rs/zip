@@ -22,6 +22,10 @@ pub enum CompressionMethod {
         feature = "deflate-zlib"
     ))]
     Deflated,
+    /// Compress the file using Deflate64.
+    /// Decoding deflate64 is supported but encoding deflate64 is not supported.
+    #[cfg(feature = "deflate64")]
+    Deflate64,
     /// Compress the file using BZIP2
     #[cfg(feature = "bzip2")]
     Bzip2,
@@ -60,6 +64,9 @@ impl CompressionMethod {
         feature = "deflate-zlib"
     )))]
     pub const DEFLATE: Self = CompressionMethod::Unsupported(8);
+    #[cfg(feature = "deflate64")]
+    pub const DEFLATE64: Self = CompressionMethod::Deflate64;
+    #[cfg(not(feature = "deflate64"))]
     pub const DEFLATE64: Self = CompressionMethod::Unsupported(9);
     pub const PKWARE_IMPLODE: Self = CompressionMethod::Unsupported(10);
     #[cfg(feature = "bzip2")]
@@ -100,6 +107,8 @@ impl CompressionMethod {
                 feature = "deflate-zlib"
             ))]
             8 => CompressionMethod::Deflated,
+            #[cfg(feature = "deflate64")]
+            9 => CompressionMethod::Deflate64,
             #[cfg(feature = "bzip2")]
             12 => CompressionMethod::Bzip2,
             #[cfg(feature = "zstd")]
@@ -126,6 +135,8 @@ impl CompressionMethod {
                 feature = "deflate-zlib"
             ))]
             CompressionMethod::Deflated => 8,
+            #[cfg(feature = "deflate64")]
+            CompressionMethod::Deflate64 => 9,
             #[cfg(feature = "bzip2")]
             CompressionMethod::Bzip2 => 12,
             #[cfg(feature = "aes-crypto")]
@@ -154,6 +165,8 @@ pub const SUPPORTED_COMPRESSION_METHODS: &[CompressionMethod] = &[
         feature = "deflate-zlib"
     ))]
     CompressionMethod::Deflated,
+    #[cfg(feature = "deflate64")]
+    CompressionMethod::Deflate64,
     #[cfg(feature = "bzip2")]
     CompressionMethod::Bzip2,
     #[cfg(feature = "zstd")]
