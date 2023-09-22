@@ -113,7 +113,7 @@ impl<R: Read> AesReader<R> {
 /// There is a 1 in 65536 chance that an invalid password passes that check.
 /// After the data has been read and decrypted an HMAC will be checked and provide a final means
 /// to check if either the password is invalid or if the data has been changed.
-pub struct AesReaderValid<R: Read> {
+pub struct AesReaderValid<R> {
     reader: R,
     data_remaining: u64,
     cipher: Box<dyn aes_ctr::AesCipher>,
@@ -177,7 +177,7 @@ impl<R: Read> Read for AesReaderValid<R> {
     }
 }
 
-impl<R: Read> AesReaderValid<R> {
+impl<R> AesReaderValid<R> {
     /// Consumes this decoder, returning the underlying reader.
     pub fn into_inner(self) -> R {
         self.reader

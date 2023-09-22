@@ -167,7 +167,7 @@ impl<R: std::io::Read> std::io::Read for ZipCryptoReaderValid<R> {
     }
 }
 
-impl<R: std::io::Read> ZipCryptoReaderValid<R> {
+impl<R> ZipCryptoReaderValid<R> {
     /// Consumes this decoder, returning the underlying reader.
     pub fn into_inner(self) -> R {
         self.reader.file
