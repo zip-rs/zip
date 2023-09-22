@@ -1129,6 +1129,104 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
     }))
 }
 
+pub fn read_zipfile_from_stream_with_compressed_size<'a, R: io::Read>(
+    reader: &'a mut R,
+    compressed_size: u64
+) -> ZipResult<Option<ZipFile<'_>>> {
+    let signature = reader.read_u32::<LittleEndian>()?;
+
+    match signature {
+        spec::LOCAL_FILE_HEADER_SIGNATURE => (),
+        spec::CENTRAL_DIRECTORY_HEADER_SIGNATURE => return Ok(None),
+        _ => return Err(ZipError::InvalidArchive("Invalid local file header")),
+    }
+
+    let version_made_by = reader.read_u16::<LittleEndian>()?;
+    let flags = reader.read_u16::<LittleEndian>()?;
+    let encrypted = flags & 1 == 1;
+    let is_utf8 = flags & (1 << 11) != 0;
+    let using_data_descriptor = flags & (1 << 3) != 0;
+    #[allow(deprecated)]
+    let compression_method = CompressionMethod::from_u16(reader.read_u16::<LittleEndian>()?);
+    let last_mod_time = reader.read_u16::<LittleEndian>()?;
+    let last_mod_date = reader.read_u16::<LittleEndian>()?;
+    let crc32 = reader.read_u32::<LittleEndian>()?;
+    let _compressed_size = reader.read_u32::<LittleEndian>()?;
+    let uncompressed_size = reader.read_u32::<LittleEndian>()?;
+    let file_name_length = reader.read_u16::<LittleEndian>()? as usize;
+    let extra_field_length = reader.read_u16::<LittleEndian>()? as usize;
+
+    let mut file_name_raw = vec![0; file_name_length];
+    reader.read_exact(&mut file_name_raw)?;
+    let mut extra_field = vec![0; extra_field_length];
+    reader.read_exact(&mut extra_field)?;
+
+    let file_name = match is_utf8 {
+        true => String::from_utf8_lossy(&file_name_raw).into_owned(),
+        false => file_name_raw.clone().from_cp437(),
+    };
+
+    let mut result = ZipFileData {
+        system: System::from_u8((version_made_by >> 8) as u8),
+        version_made_by: version_made_by as u8,
+        encrypted,
+        using_data_descriptor,
+        compression_method,
+        compression_level: None,
+        last_modified_time: DateTime::from_msdos(last_mod_date, last_mod_time),
+        crc32,
+        compressed_size: compressed_size as u64,
+        uncompressed_size: uncompressed_size as u64,
+        file_name,
+        file_name_raw,
+        extra_field,
+        file_comment: String::new(), // file comment is only available in the central directory
+        // header_start and data start are not available, but also don't matter, since seeking is
+        // not available.
+        header_start: 0,
+        data_start: AtomicU64::new(0),
+        central_header_start: 0,
+        // The external_attributes field is only available in the central directory.
+        // We set this to zero, which should be valid as the docs state 'If input came
+        // from standard input, this field is set to zero.'
+        external_attributes: 0,
+        large_file: false,
+        aes_mode: None,
+    };
+
+    match parse_extra_field(&mut result) {
+        Ok(..) | Err(ZipError::Io(..)) => {}
+        Err(e) => return Err(e),
+    }
+
+    if encrypted {
+        return unsupported_zip_error("Encrypted files are not supported");
+    }
+
+    let limit_reader = (reader as &'a mut dyn io::Read).take(result.compressed_size);
+
+    let result_crc32 = result.crc32;
+    let result_compression_method = result.compression_method;
+    let crypto_reader = make_crypto_reader(
+        result_compression_method,
+        result_crc32,
+        result.last_modified_time,
+        result.using_data_descriptor,
+        limit_reader,
+        None,
+        None,
+        #[cfg(feature = "aes-crypto")]
+            result.compressed_size,
+    )?
+        .unwrap();
+
+    Ok(Some(ZipFile {
+        data: Cow::Owned(result),
+        crypto_reader: None,
+        reader: make_reader(result_compression_method, result_crc32, crypto_reader),
+    }))
+}
+
 #[cfg(test)]
 mod test {
     #[test]
