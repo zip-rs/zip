@@ -1,0 +1,27 @@
+[package]
+name                    = "tmp"
+version                 = "0.0.0"
+edition                 = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+zip                     = { path = ".." }
+libc                    = "0.2"
+tokio                   = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile                = "3"
+getrandom               = "0.2"
+once_cell               = "1"
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+[[bin]]
+name = "copy-file-range"
+path = "src/copy-file-range.rs"
+
+[profile.release]
+strip                   = false
+debug                   = true
+# lto                     = true

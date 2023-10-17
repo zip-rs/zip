@@ -6,6 +6,7 @@ use crate::result::{ZipError, ZipResult};
 use crate::spec;
 use crate::types::{AtomicU64, DateTime, System, ZipFileData, DEFAULT_VERSION};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use cfg_if::cfg_if;
 use crc32fast::Hasher;
 use std::convert::TryInto;
 use std::default::Default;
@@ -106,27 +107,37 @@ pub(crate) mod zip_writer {
 pub use zip_writer::ZipWriter;
 
 #[derive(Default)]
-struct ZipWriterStats {
-    hasher: Hasher,
-    start: u64,
-    bytes_written: u64,
+pub(crate) struct ZipWriterStats {
+    pub(crate) hasher: Hasher,
+    pub(crate) start: u64,
+    pub(crate) bytes_written: u64,
 }
 
-struct ZipRawValues {
-    crc32: u32,
-    compressed_size: u64,
-    uncompressed_size: u64,
+pub(crate) struct ZipRawValues {
+    pub(crate) crc32: u32,
+    pub(crate) compressed_size: u64,
+    pub(crate) uncompressed_size: u64,
+}
+
+impl Default for ZipRawValues {
+    fn default() -> Self {
+        Self {
+            crc32: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+        }
+    }
 }
 
 /// Metadata for a file to be written
 #[derive(Copy, Clone)]
 pub struct FileOptions {
-    compression_method: CompressionMethod,
-    compression_level: Option<i32>,
-    last_modified_time: DateTime,
-    permissions: Option<u32>,
-    large_file: bool,
-    encrypt_with: Option<crate::zipcrypto::ZipCryptoKeys>,
+    pub(crate) compression_method: CompressionMethod,
+    pub(crate) compression_level: Option<i32>,
+    pub(crate) last_modified_time: DateTime,
+    pub(crate) permissions: Option<u32>,
+    pub(crate) large_file: bool,
+    pub(crate) encrypt_with: Option<crate::zipcrypto::ZipCryptoKeys>,
 }
 
 impl FileOptions {
@@ -199,24 +210,28 @@ impl FileOptions {
 impl Default for FileOptions {
     /// Construct a new FileOptions object
     fn default() -> Self {
+        cfg_if! {
+                if #[cfg(any(
+                    feature = "deflate",
+                    feature = "deflate-miniz",
+                    feature = "deflate-zlib"
+                ))] {
+                    let compression_method = CompressionMethod::Deflated;
+                } else {
+                    let compression_method = CompressionMethod::Stored;
+                }
+        }
+        cfg_if! {
+            if #[cfg(feature = "time")] {
+                let last_modified_time = OffsetDateTime::now_utc().try_into().unwrap_or_default();
+            } else {
+                let last_modified_time = DateTime::default();
+            }
+        }
         Self {
-            #[cfg(any(
-                feature = "deflate",
-                feature = "deflate-miniz",
-                feature = "deflate-zlib"
-            ))]
-            compression_method: CompressionMethod::Deflated,
-            #[cfg(not(any(
-                feature = "deflate",
-                feature = "deflate-miniz",
-                feature = "deflate-zlib"
-            )))]
-            compression_method: CompressionMethod::Stored,
+            compression_method,
             compression_level: None,
-            #[cfg(feature = "time")]
-            last_modified_time: OffsetDateTime::now_utc().try_into().unwrap_or_default(),
-            #[cfg(not(feature = "time"))]
-            last_modified_time: DateTime::default(),
+            last_modified_time,
             permissions: None,
             large_file: false,
             encrypt_with: None,
@@ -272,7 +287,7 @@ impl<W: Write + io::Seek> Write for ZipWriter<W> {
 }
 
 impl ZipWriterStats {
-    fn update(&mut self, buf: &[u8]) {
+    pub(crate) fn update(&mut self, buf: &[u8]) {
         self.hasher.update(buf);
         self.bytes_written += buf.len() as u64;
     }
@@ -410,8 +425,12 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             self.files.push(file);
         }
         if let Some(keys) = options.encrypt_with {
-            let mut zipwriter = crate::zipcrypto::ZipCryptoWriter { writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(), buffer: vec![], keys };
-            let mut crypto_header = [0u8; 12];
+            let mut zipwriter = crate::zipcrypto::ZipCryptoWriter {
+                writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(),
+                buffer: vec![],
+                keys,
+            };
+            let crypto_header = [0u8; 12];
 
             zipwriter.write_all(&crypto_header)?;
             self.inner = GenericZipWriter::Storer(MaybeEncrypted::Encrypted(zipwriter));
@@ -428,10 +447,11 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         match core::mem::replace(&mut self.inner, GenericZipWriter::Closed) {
             GenericZipWriter::Storer(MaybeEncrypted::Encrypted(writer)) => {
                 let crc32 = self.stats.hasher.clone().finalize();
-                self.inner = GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer.finish(crc32)?))
+                self.inner =
+                    GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer.finish(crc32)?))
             }
             GenericZipWriter::Storer(w) => self.inner = GenericZipWriter::Storer(w),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
         let writer = self.inner.get_plain();
 
@@ -1375,7 +1395,7 @@ mod test {
             .add_directory(
                 "test",
                 FileOptions::default().last_modified_time(
-                    DateTime::from_date_and_time(2018, 8, 15, 20, 45, 6).unwrap(),
+                    DateTime::parse_from_date_and_time(2018, 8, 15, 20, 45, 6).unwrap(),
                 ),
             )
             .unwrap();
@@ -1404,7 +1424,7 @@ mod test {
                 "name",
                 "target",
                 FileOptions::default().last_modified_time(
-                    DateTime::from_date_and_time(2018, 8, 15, 20, 45, 6).unwrap(),
+                    DateTime::parse_from_date_and_time(2018, 8, 15, 20, 45, 6).unwrap(),
                 ),
             )
             .unwrap();
@@ -1433,7 +1453,7 @@ mod test {
                 "directory\\link",
                 "/absolute/symlink\\with\\mixed/slashes",
                 FileOptions::default().last_modified_time(
-                    DateTime::from_date_and_time(2018, 8, 15, 20, 45, 6).unwrap(),
+                    DateTime::parse_from_date_and_time(2018, 8, 15, 20, 45, 6).unwrap(),
                 ),
             )
             .unwrap();
@@ -1497,7 +1517,7 @@ mod test {
 }
 
 #[cfg(not(feature = "unreserved"))]
-const EXTRA_FIELD_MAPPING: [u16; 49] = [
+pub(crate) const EXTRA_FIELD_MAPPING: [u16; 49] = [
     0x0001, 0x0007, 0x0008, 0x0009, 0x000a, 0x000c, 0x000d, 0x000e, 0x000f, 0x0014, 0x0015, 0x0016,
     0x0017, 0x0018, 0x0019, 0x0020, 0x0021, 0x0022, 0x0023, 0x0065, 0x0066, 0x4690, 0x07c8, 0x2605,
     0x2705, 0x2805, 0x334d, 0x4341, 0x4453, 0x4704, 0x470f, 0x4b46, 0x4c41, 0x4d49, 0x4f4c, 0x5356,

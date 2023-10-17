@@ -1,8 +1,13 @@
 //! Error types that can be emitted from this library
 
+use displaydoc::Display;
+use thiserror::Error;
+
 use std::error::Error;
 use std::fmt;
 use std::io;
+use std::num::TryFromIntError;
+use std::ops::{Range, RangeInclusive};
 
 /// Generic result type with ZipError as its error variant
 pub type ZipResult<T> = Result<T, ZipError>;
@@ -20,45 +25,19 @@ impl fmt::Display for InvalidPassword {
 impl Error for InvalidPassword {}
 
 /// Error type for Zip
-#[derive(Debug)]
+#[derive(Debug, Display, Error)]
 pub enum ZipError {
-    /// An Error caused by I/O
-    Io(io::Error),
+    /// i/o error: {0}
+    Io(#[from] io::Error),
 
-    /// This file is probably not a zip archive
+    /// invalid Zip archive: {0}
     InvalidArchive(&'static str),
 
-    /// This archive is not supported
+    /// unsupported Zip archive: {0}
     UnsupportedArchive(&'static str),
 
-    /// The requested file could not be found in the archive
+    /// specified file not found in archive
     FileNotFound,
-}
-
-impl From<io::Error> for ZipError {
-    fn from(err: io::Error) -> ZipError {
-        ZipError::Io(err)
-    }
-}
-
-impl fmt::Display for ZipError {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ZipError::Io(err) => write!(fmt, "{err}"),
-            ZipError::InvalidArchive(err) => write!(fmt, "invalid Zip archive: {err}"),
-            ZipError::UnsupportedArchive(err) => write!(fmt, "unsupported Zip archive: {err}"),
-            ZipError::FileNotFound => write!(fmt, "specified file not found in archive"),
-        }
-    }
-}
-
-impl Error for ZipError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            ZipError::Io(err) => Some(err),
-            _ => None,
-        }
-    }
 }
 
 impl ZipError {
@@ -83,16 +62,20 @@ impl From<ZipError> for io::Error {
 }
 
 /// Error type for time parsing
-#[derive(Debug)]
-pub struct DateTimeRangeError;
-
-impl fmt::Display for DateTimeRangeError {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            fmt,
-            "a date could not be represented within the bounds the MS-DOS date range (1980-2107)"
-        )
-    }
+#[derive(Debug, Display, Error)]
+pub enum DateTimeRangeError {
+    /// year {0} was not in range {1:?}
+    InvalidYear(u16, RangeInclusive<u16>),
+    /// month {0} was not in range {1:?}
+    InvalidMonth(u8, RangeInclusive<u8>),
+    /// day {0} was not in range {1:?}
+    InvalidDay(u8, RangeInclusive<u8>),
+    /// hour {0} was not in range {1:?}
+    InvalidHour(u8, Range<u8>),
+    /// minute {0} was not in range {1:?}
+    InvalidMinute(u8, Range<u8>),
+    /// second {0} was not in range {1:?}
+    InvalidSecond(u8, RangeInclusive<u8>),
+    /// failed to convert {0}: {1}
+    NumericConversion(&'static str, #[source] TryFromIntError),
 }
-
-impl Error for DateTimeRangeError {}

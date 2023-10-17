@@ -1,7 +1,6 @@
 //! Helper module to compute a CRC32 checksum
 
 use std::io;
-use std::io::prelude::*;
 
 use crc32fast::Hasher;
 
@@ -27,6 +26,7 @@ impl<R> Crc32Reader<R> {
         }
     }
 
+    #[inline]
     fn check_matches(&self) -> bool {
         self.check == self.hasher.clone().finalize()
     }
@@ -36,7 +36,7 @@ impl<R> Crc32Reader<R> {
     }
 }
 
-impl<R: Read> Read for Crc32Reader<R> {
+impl<R: std::io::Read> std::io::Read for Crc32Reader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let invalid_check = !buf.is_empty() && !self.check_matches() && !self.ae2_encrypted;
 
@@ -55,6 +55,7 @@ impl<R: Read> Read for Crc32Reader<R> {
 #[cfg(test)]
 mod test {
     use super::*;
+
     use std::io::Read;
 
     #[test]
