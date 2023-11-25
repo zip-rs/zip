@@ -8,7 +8,7 @@ pub mod write {
     /// Unstable methods for [`FileOptions`].
     pub trait FileOptionsExt {
         /// Write the file with the given password using the deprecated ZipCrypto algorithm.
-        /// 
+        ///
         /// This is not recommended for new archives, as ZipCrypto is not secure.
         fn with_deprecated_encryption(self, password: &[u8]) -> Self;
     }

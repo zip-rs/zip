@@ -203,9 +203,103 @@ fn zip64_large() {
             file.size()
         );
 
-        match file.read_exact(&mut buf) {
-            Ok(()) => println!("The first {} bytes are: {:?}", buf.len(), buf),
-            Err(e) => println!("Could not read the file: {e:?}"),
-        };
+        file.read_exact(&mut buf).unwrap();
+        println!("The first {} bytes are: {:?}", buf.len(), buf);
+    }
+}
+
+// run this test only when compiled with optimizations
+#[cfg(not(debug_assertions))]
+mod write {
+    use std::io::{Cursor, Read, Write};
+
+    use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
+
+    fn write_large(file: &mut Cursor<Vec<u8>>) -> zip::result::ZipResult<()> {
+        let mut zip = ZipWriter::new(file);
+        let options = FileOptions::default()
+            .compression_method(CompressionMethod::Zstd)
+            .compression_level(Some(-7))
+            .large_file(true);
+        zip.start_file("large", options)?;
+
+        let chunk = vec![0u8; 1 * 1024 * 1024];
+        for _ in 0..5000 {
+            zip.write_all(&chunk)?;
+        }
+        zip.finish()?;
+        Ok(())
+    }
+
+    fn check_large(data: &[u8]) -> zip::result::ZipResult<()> {
+        let mut zip = ZipArchive::new(Cursor::new(data))?;
+        assert_eq!(zip.file_names().collect::<Vec<_>>(), vec!["large"]);
+        let mut file = zip.by_index(0)?;
+        assert_eq!(file.size(), 5000 * 1024 * 1024);
+        assert!(
+            file.compressed_size() < 500_000,
+            "expected good compression: {}",
+            file.compressed_size(),
+        );
+
+        let mut chunk = vec![0u8; 1 * 1024 * 1024];
+        let mut total_read = 0;
+        loop {
+            let bytes_read = file.read(&mut chunk)?;
+            total_read += bytes_read;
+            for &b in &chunk[..bytes_read] {
+                assert_eq!(b, 0);
+            }
+            if bytes_read == 0 {
+                break;
+            }
+        }
+        assert_eq!(total_read, 5000 * 1024 * 1024);
+
+        Ok(())
+    }
+
+    fn write_many(file: &mut Cursor<Vec<u8>>) -> zip::result::ZipResult<()> {
+        let mut zip = ZipWriter::new(file);
+        let options = FileOptions::default().compression_method(CompressionMethod::Stored);
+
+        for i in 0..70_000 {
+            zip.start_file(format!("f{:05}", i), options)?;
+            zip.write_all(&[0u8; 1])?;
+        }
+        zip.finish()?;
+        Ok(())
+    }
+
+    fn check_many(data: &[u8]) -> zip::result::ZipResult<()> {
+        let mut zip = ZipArchive::new(Cursor::new(data))?;
+        assert_eq!(zip.len(), 70_000);
+        for i in 0..70_000 {
+            let mut file = zip.by_index(i)?;
+            assert_eq!(file.size(), 1);
+            let mut buf = [0u8; 1];
+            file.read_exact(&mut buf)?;
+            assert_eq!(buf[0], 0);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn zip64_large_file_write() {
+        let mut buffer = Cursor::new(Vec::new());
+        println!("generating zip64 with 5GB file");
+        write_large(&mut buffer).unwrap();
+        println!("validating zip64 with 5GB file");
+        check_large(&buffer.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn zip64_many_files_write() {
+        let mut buffer = Cursor::new(Vec::new());
+        println!("generating zip64 with 70k files");
+        write_many(&mut buffer).unwrap();
+        println!("validating zip64 with 70k files");
+        check_many(&buffer.into_inner()).unwrap();
     }
 }

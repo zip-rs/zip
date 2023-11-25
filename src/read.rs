@@ -888,7 +888,7 @@ impl<'a> ZipFile<'a> {
     /// `foo/../bar` as `foo/bar` (instead of `bar`). Because of this,
     /// [`ZipFile::enclosed_name`] is the better option in most scenarios.
     ///
-    /// [`ParentDir`]: `Component::ParentDir`
+    /// [`ParentDir`]: `std::path::Component::ParentDir`
     pub fn mangled_name(&self) -> ::std::path::PathBuf {
         self.data.file_name_sanitized()
     }
@@ -991,7 +991,7 @@ impl<'a> Drop for ZipFile<'a> {
             // Get the inner `Take` reader so all decryption, decompression and CRC calculation is skipped.
             let mut reader: std::io::Take<&mut dyn std::io::Read> = match &mut self.reader {
                 ZipFileReader::NoReader => {
-                    let innerreader = ::std::mem::replace(&mut self.crypto_reader, None);
+                    let innerreader = self.crypto_reader.take();
                     innerreader.expect("Invalid reader state").into_inner()
                 }
                 reader => {

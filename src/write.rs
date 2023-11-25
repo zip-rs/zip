@@ -47,7 +47,7 @@ impl<W: Write> Write for MaybeEncrypted<W> {
         }
     }
 }
-enum GenericZipWriter<W: Write + io::Seek> {
+enum GenericZipWriter<W: Write> {
     Closed,
     Storer(MaybeEncrypted<W>),
     #[cfg(any(
@@ -92,8 +92,9 @@ pub(crate) mod zip_writer {
     /// # }
     /// # doit().unwrap();
     /// ```
-    pub struct ZipWriter<W: Write + io::Seek> {
-        pub(super) inner: GenericZipWriter<W>,
+    pub struct ZipWriter<W: Write> {
+        pub(super) inner: GenericZipWriter<MaybeSeekable<W>>,
+        pub(super) encrypt_with: Option<crate::zipcrypto::ZipCryptoKeys>,
         pub(super) files: Vec<ZipFileData>,
         pub(super) stats: ZipWriterStats,
         pub(super) writing_to_file: bool,
@@ -190,6 +191,7 @@ impl FileOptions {
         self.large_file = large;
         self
     }
+
     pub(crate) fn with_deprecated_encryption(mut self, password: &[u8]) -> FileOptions {
         self.encrypt_with = Some(crate::zipcrypto::ZipCryptoKeys::derive(password));
         self
@@ -224,7 +226,7 @@ impl Default for FileOptions {
     }
 }
 
-impl<W: Write + io::Seek> Write for ZipWriter<W> {
+impl<W: Write> Write for ZipWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if !self.writing_to_file {
             return Err(io::Error::new(
@@ -308,7 +310,10 @@ impl<A: Read + Write + io::Seek> ZipWriter<A> {
         let _ = readwriter.seek(io::SeekFrom::Start(directory_start)); // seek directory_start to overwrite it
 
         Ok(ZipWriter {
-            inner: GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(readwriter)),
+            inner: GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(MaybeSeekable::new(
+                readwriter,
+            ))),
+            encrypt_with: None,
             files,
             stats: Default::default(),
             writing_to_file: false,
@@ -326,7 +331,39 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     /// Before writing to this object, the [`ZipWriter::start_file`] function should be called.
     pub fn new(inner: W) -> ZipWriter<W> {
         ZipWriter {
-            inner: GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(inner)),
+            inner: GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(MaybeSeekable::new(inner))),
+            encrypt_with: None,
+            files: Vec::new(),
+            stats: Default::default(),
+            writing_to_file: false,
+            writing_to_extra_field: false,
+            writing_to_central_extra_field_only: false,
+            writing_raw: false,
+            comment: Vec::new(),
+        }
+    }
+}
+
+impl<W: Write> ZipWriter<W> {
+    /// Initializes ZipWriter in streaming mode that can be used for unseekable writers (e.g. stdout, pipe, socket).
+    ///
+    /// The ZIP format supports this mode using data descriptor records emitted after each local file data.
+    /// Local file headers' crc32, size and compressed_size fields with be set to 0.
+    ///
+    /// The data descriptors add a size overhead of 16 bytes per file (or 24 in case of [`FileOptions::large_file`]),
+    /// and can be incompatible with some parsers -- this crate's [`read_zipfile_from_stream`] function ironically being one such example.
+    ///
+    /// [`ZipWriter::new`] should be preferred when `W` implements [`io::Seek`].
+    ///
+    /// Before writing to this object, the [`ZipWriter::start_file`] function should be called.
+    ///
+    /// [`read_zipfile_from_stream`]: `crate::read::read_zipfile_from_stream`
+    pub fn new_streaming(inner: W) -> ZipWriter<W> {
+        ZipWriter {
+            inner: GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(
+                MaybeSeekable::new_unseekable(inner),
+            )),
+            encrypt_with: None,
             files: Vec::new(),
             stats: Default::default(),
             writing_to_file: false,
@@ -380,7 +417,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 system: System::Unix,
                 version_made_by: DEFAULT_VERSION,
                 encrypted: options.encrypt_with.is_some(),
-                using_data_descriptor: false,
+                using_data_descriptor: !writer.can_seek(),
                 compression_method: options.compression_method,
                 compression_level: options.compression_level,
                 last_modified_time: options.last_modified_time,
@@ -398,9 +435,10 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 large_file: options.large_file,
                 aes_mode: None,
             };
-            write_local_file_header(writer, &file)?;
 
-            let header_end = writer.stream_position()?;
+            // to allow streaming mode, the local header is not actually written here; instead, it is only
+            // written in `end_extra_data`, where we can know the final value for the extra_len field
+            let header_end = header_start + file.local_header_size();
             self.stats.start = header_end;
             *file.data_start.get_mut() = header_end;
 
@@ -409,13 +447,9 @@ impl<W: Write + io::Seek> ZipWriter<W> {
 
             self.files.push(file);
         }
-        if let Some(keys) = options.encrypt_with {
-            let mut zipwriter = crate::zipcrypto::ZipCryptoWriter { writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(), buffer: vec![], keys };
-            let mut crypto_header = [0u8; 12];
 
-            zipwriter.write_all(&crypto_header)?;
-            self.inner = GenericZipWriter::Storer(MaybeEncrypted::Encrypted(zipwriter));
-        }
+        // save ZipCrypto keys so that writer can be switched to encrypted mode after writing extra data
+        self.encrypt_with = options.encrypt_with;
         Ok(())
     }
 
@@ -424,30 +458,44 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             // Implicitly calling [`ZipWriter::end_extra_data`] for empty files.
             self.end_extra_data()?;
         }
+
         self.inner.switch_to(CompressionMethod::Stored, None)?;
         match core::mem::replace(&mut self.inner, GenericZipWriter::Closed) {
             GenericZipWriter::Storer(MaybeEncrypted::Encrypted(writer)) => {
                 let crc32 = self.stats.hasher.clone().finalize();
-                self.inner = GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer.finish(crc32)?))
+                let writer = writer.finish(crc32)?;
+                self.inner = GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer));
             }
             GenericZipWriter::Storer(w) => self.inner = GenericZipWriter::Storer(w),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
-        let writer = self.inner.get_plain();
 
+        let writer = self.inner.get_plain();
         if !self.writing_raw {
             let file = match self.files.last_mut() {
                 None => return Ok(()),
                 Some(f) => f,
             };
+
             file.crc32 = self.stats.hasher.clone().finalize();
             file.uncompressed_size = self.stats.bytes_written;
 
             let file_end = writer.stream_position()?;
-            file.compressed_size = file_end - self.stats.start;
+            file.compressed_size = file_end
+                .checked_sub(self.stats.start)
+                .expect("flush_local_header not properly called");
 
-            update_local_file_header(writer, file)?;
-            writer.seek(io::SeekFrom::Start(file_end))?;
+            if file.using_data_descriptor {
+                if file.large_file {
+                    write_zip64_data_descriptor(writer, file)?;
+                } else {
+                    write_data_descriptor(writer, file)?;
+                }
+            } else {
+                let mut writer = writer.unwrap_seekable();
+                update_local_file_header(&mut writer, file)?;
+                writer.seek(io::SeekFrom::Start(file_end))?;
+            }
         }
 
         self.writing_to_file = false;
@@ -467,6 +515,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         }
         *options.permissions.as_mut().unwrap() |= 0o100000;
         self.start_entry(name, options, None)?;
+        self.flush_local_header()?;
         self.inner
             .switch_to(options.compression_method, options.compression_level)?;
         self.writing_to_file = true;
@@ -621,37 +670,48 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 "Not writing to extra field",
             )));
         }
-        let file = self.files.last_mut().unwrap();
 
-        validate_extra_data(file)?;
+        let data_start = if !self.writing_to_central_extra_field_only {
+            let data_start = self.flush_local_header()?;
 
-        let data_start = file.data_start.get_mut();
-
-        if !self.writing_to_central_extra_field_only {
-            let writer = self.inner.get_plain();
-
-            // Append extra data to local file header and keep it for central file header.
-            writer.write_all(&file.extra_field)?;
-
-            // Update final `data_start`.
-            let header_end = *data_start + file.extra_field.len() as u64;
-            self.stats.start = header_end;
-            *data_start = header_end;
-
-            // Update extra field length in local file header.
-            let extra_field_length =
-                if file.large_file { 20 } else { 0 } + file.extra_field.len() as u16;
-            writer.seek(io::SeekFrom::Start(file.header_start + 28))?;
-            writer.write_u16::<LittleEndian>(extra_field_length)?;
-            writer.seek(io::SeekFrom::Start(header_end))?;
-
+            let file: &ZipFileData = self.files.last().unwrap();
             self.inner
                 .switch_to(file.compression_method, file.compression_level)?;
-        }
+            data_start
+        } else {
+            let file: &ZipFileData = self.files.last().unwrap();
+            file.data_start.load()
+        };
 
         self.writing_to_extra_field = false;
         self.writing_to_central_extra_field_only = false;
-        Ok(*data_start)
+        Ok(data_start)
+    }
+
+    fn flush_local_header(&mut self) -> ZipResult<u64> {
+        let file: &mut ZipFileData = self.files.last_mut().unwrap();
+        let writer = self.inner.get_plain();
+
+        validate_extra_data(file.extra_field.as_slice())?;
+        write_local_file_header(writer, file)?;
+
+        if let Some(keys) = self.encrypt_with.take() {
+            let mut zipwriter = crate::zipcrypto::ZipCryptoWriter {
+                writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(),
+                buffer: vec![],
+                keys,
+            };
+            let crypto_header = [0u8; 12];
+            zipwriter.write_all(&crypto_header)?;
+            self.inner = GenericZipWriter::Storer(MaybeEncrypted::Encrypted(zipwriter));
+        }
+
+        // Update final `data_start`.
+        let data_start = file.header_start + file.local_header_size();
+        self.stats.start = data_start;
+        *file.data_start.get_mut() = data_start;
+
+        Ok(data_start)
     }
 
     /// Add a new file using the already compressed data from a ZIP file being read and renames it, this
@@ -699,11 +759,11 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         };
 
         self.start_entry(name, options, Some(raw_values))?;
+        self.flush_local_header()?;
         self.writing_to_file = true;
         self.writing_raw = true;
 
         io::copy(file.get_raw_reader(), self)?;
-
         Ok(())
     }
 
@@ -756,6 +816,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         };
 
         self.start_entry(name_with_slash, options, None)?;
+        self.flush_local_header()?;
         self.writing_to_file = false;
         Ok(())
     }
@@ -783,7 +844,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     pub fn finish(&mut self) -> ZipResult<W> {
         self.finalize()?;
         let inner = mem::replace(&mut self.inner, GenericZipWriter::Closed);
-        Ok(inner.unwrap())
+        Ok(inner.unwrap().unwrap())
     }
 
     /// Add a symlink entry.
@@ -817,6 +878,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         options.compression_method = CompressionMethod::Stored;
 
         self.start_entry(name, options, None)?;
+        self.flush_local_header()?;
         self.writing_to_file = true;
         self.write_all(target.into().as_bytes())?;
         self.writing_to_file = false;
@@ -879,7 +941,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     }
 }
 
-impl<W: Write + io::Seek> Drop for ZipWriter<W> {
+impl<W: Write> Drop for ZipWriter<W> {
     fn drop(&mut self) {
         if !self.inner.is_closed() {
             if let Err(e) = self.finalize() {
@@ -889,7 +951,7 @@ impl<W: Write + io::Seek> Drop for ZipWriter<W> {
     }
 }
 
-impl<W: Write + io::Seek> GenericZipWriter<W> {
+impl<W: Write> GenericZipWriter<W> {
     fn switch_to(
         &mut self,
         compression: CompressionMethod,
@@ -1086,18 +1148,14 @@ fn clamp_opt<T: Ord + Copy>(value: T, range: std::ops::RangeInclusive<T>) -> Opt
     }
 }
 
+/// Writes local file header and name. Does NOT write extra_field.
 fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipResult<()> {
     // local file header signature
     writer.write_u32::<LittleEndian>(spec::LOCAL_FILE_HEADER_SIGNATURE)?;
     // version needed to extract
     writer.write_u16::<LittleEndian>(file.version_needed())?;
     // general purpose bit flag
-    let flag = if !file.file_name.is_ascii() {
-        1u16 << 11
-    } else {
-        0
-    } | if file.encrypted { 1u16 << 0 } else { 0 };
-    writer.write_u16::<LittleEndian>(flag)?;
+    writer.write_u16::<LittleEndian>(file.gp_flags())?;
     // Compression method
     #[allow(deprecated)]
     writer.write_u16::<LittleEndian>(file.compression_method.to_u16())?;
@@ -1125,7 +1183,8 @@ fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipR
     if file.large_file {
         write_local_zip64_extra_field(writer, file)?;
     }
-
+    // user-provided extra fields
+    writer.write_all(&file.extra_field)?;
     Ok(())
 }
 
@@ -1167,12 +1226,7 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
     // version needed to extract
     writer.write_u16::<LittleEndian>(file.version_needed())?;
     // general puprose bit flag
-    let flag = if !file.file_name.is_ascii() {
-        1u16 << 11
-    } else {
-        0
-    } | if file.encrypted { 1u16 << 0 } else { 0 };
-    writer.write_u16::<LittleEndian>(flag)?;
+    writer.write_u16::<LittleEndian>(file.gp_flags())?;
     // compression method
     #[allow(deprecated)]
     writer.write_u16::<LittleEndian>(file.compression_method.to_u16())?;
@@ -1211,9 +1265,7 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
     Ok(())
 }
 
-fn validate_extra_data(file: &ZipFileData) -> ZipResult<()> {
-    let mut data = file.extra_field.as_slice();
-
+fn validate_extra_data(mut data: &[u8]) -> ZipResult<()> {
     if data.len() > spec::ZIP64_ENTRY_THR {
         return Err(ZipError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1339,6 +1391,140 @@ fn path_to_string(path: &std::path::Path) -> String {
         }
     }
     path_str
+}
+
+fn write_data_descriptor<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipResult<()> {
+    writer.write_u32::<LittleEndian>(spec::DATA_DESCRIPTOR_SIGNATURE)?;
+    writer.write_u32::<LittleEndian>(file.crc32)?;
+    writer.write_u32::<LittleEndian>(file.compressed_size as u32)?;
+    writer.write_u32::<LittleEndian>(file.uncompressed_size as u32)?;
+    Ok(())
+}
+
+fn write_zip64_data_descriptor<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipResult<()> {
+    writer.write_u32::<LittleEndian>(spec::DATA_DESCRIPTOR_SIGNATURE)?;
+    writer.write_u32::<LittleEndian>(file.crc32)?;
+    writer.write_u64::<LittleEndian>(file.compressed_size)?;
+    writer.write_u64::<LittleEndian>(file.uncompressed_size)?;
+    Ok(())
+}
+
+type SeekFn<W> = for<'a> fn(&'a mut W, io::SeekFrom) -> io::Result<u64>;
+
+enum WriterFlavour<W> {
+    CanSeek { seek: SeekFn<W> },
+    CannotSeek { pos: u64 },
+}
+
+/// Type that can hold either a seekable or unseekable writer. This is used to support `ZipWriter::new_streaming`.
+/// `stream_position` is provided as an inherent method.
+/// For unseekable writers, the position is tracked by manually counting the bytes written.
+struct MaybeSeekable<W> {
+    inner: W,
+    flavour: WriterFlavour<W>,
+}
+
+impl<W: Write + io::Seek> MaybeSeekable<W> {
+    /// Construct from seekable writer.
+    pub fn new(inner: W) -> Self
+    where
+        W: Seek,
+    {
+        MaybeSeekable {
+            inner,
+            flavour: WriterFlavour::CanSeek { seek: Seek::seek },
+        }
+    }
+}
+
+impl<W: Write> MaybeSeekable<W> {
+    /// Construct from unseekable writer.
+    pub fn new_unseekable(inner: W) -> Self {
+        MaybeSeekable {
+            inner,
+            flavour: WriterFlavour::CannotSeek { pos: 0 },
+        }
+    }
+
+    fn can_seek(&self) -> bool {
+        match self.flavour {
+            WriterFlavour::CannotSeek { .. } => false,
+            WriterFlavour::CanSeek { .. } => true,
+        }
+    }
+
+    /// Return a writer that implements `io::Seek` by delegating to the inner writer if `can_seek` is true.
+    /// Panics if `can_seek` is false.
+    fn unwrap_seekable(&mut self) -> impl Write + io::Seek + '_ {
+        match self.flavour {
+            WriterFlavour::CannotSeek { .. } => {
+                panic!("unwrap_seekable called with unseekable writer")
+            }
+            WriterFlavour::CanSeek { ref mut seek } => SeekableWriterWrapper {
+                inner: &mut self.inner,
+                seek_fn: seek,
+            },
+        }
+    }
+
+    fn stream_position(&mut self) -> io::Result<u64> {
+        match self.flavour {
+            WriterFlavour::CannotSeek { pos } => Ok(pos),
+            WriterFlavour::CanSeek { seek } => seek(&mut self.inner, io::SeekFrom::Current(0)),
+        }
+    }
+
+    fn unwrap(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: io::Seek> io::Seek for MaybeSeekable<W> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        match self.flavour {
+            WriterFlavour::CannotSeek { .. } => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Unsupported operation",
+            )),
+            WriterFlavour::CanSeek { seek } => seek(&mut self.inner, pos),
+        }
+    }
+}
+
+impl<W: Write> Write for MaybeSeekable<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        if let WriterFlavour::CannotSeek { ref mut pos } = &mut self.flavour {
+            *pos += n as u64
+        };
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+// Type-erased wrapper for a seekable writer. Returned from `MaybeSeekable::unwrap_seekable`.
+struct SeekableWriterWrapper<'a, W> {
+    inner: &'a mut W,
+    seek_fn: &'a SeekFn<W>,
+}
+
+impl<'a, W> io::Seek for SeekableWriterWrapper<'a, W> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        (self.seek_fn)(self.inner, pos)
+    }
+}
+
+impl<'a, W: Write> Write for SeekableWriterWrapper<'a, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 #[cfg(test)]
@@ -1477,6 +1663,55 @@ mod test {
         assert_eq!(result.get_ref().len(), 153);
         let mut v = Vec::new();
         v.extend_from_slice(include_bytes!("../tests/data/mimetype.zip"));
+        assert_eq!(result.get_ref(), &v);
+    }
+
+    #[test]
+    fn write_data_descriptors_zip() {
+        let mut writer = ZipWriter::new_streaming(io::Cursor::new(Vec::new()));
+        let options = FileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .last_modified_time(DateTime::default());
+
+        writer.start_file("test", options).unwrap();
+        writer.write_all(b"_test").unwrap();
+
+        writer.start_file("z64", options.large_file(true)).unwrap();
+        writer.write_all(b"_z64").unwrap();
+
+        writer
+            .start_file(
+                "deflate",
+                options.compression_method(CompressionMethod::Deflated),
+            )
+            .unwrap();
+        writer.write_all(b"_deflate").unwrap();
+
+        writer.start_file_with_extra_data("extra", options).unwrap();
+        writer.write_all(&[0xbe, 0xef, 0x06, 0x00]).unwrap();
+        writer.write_all(b"_extra").unwrap();
+        writer.end_local_start_central_extra_data().unwrap();
+        writer.write_all(&[0xca, 0xfe, 0x09, 0x00]).unwrap();
+        writer.write_all(b"_extra_cd").unwrap();
+        writer.end_extra_data().unwrap();
+
+        writer
+            .start_file_with_extra_data(
+                "z64_extra_deflate",
+                options
+                    .compression_method(CompressionMethod::Deflated)
+                    .large_file(true),
+            )
+            .unwrap();
+        writer.write_all(&[0xf0, 0x0d, 0x04, 0x00]).unwrap();
+        writer.write_all(b"_zed").unwrap();
+        writer.end_extra_data().unwrap();
+        writer.write_all(b"_z64_extra_deflate").unwrap();
+        let result = writer.finish().unwrap();
+
+        assert_eq!(result.get_ref().len(), 688);
+        let mut v = Vec::new();
+        v.extend_from_slice(include_bytes!("../tests/data/zip_data_descriptors.zip"));
         assert_eq!(result.get_ref(), &v);
     }
 

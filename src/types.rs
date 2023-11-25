@@ -422,10 +422,43 @@ impl ZipFileData {
         }
     }
 
-    pub fn zip64_extension(&self) -> bool {
+    pub(crate) fn zip64_sizes(&self) -> bool {
         self.uncompressed_size > 0xFFFFFFFF
             || self.compressed_size > 0xFFFFFFFF
+    }
+
+    pub fn zip64_extension(&self) -> bool {
+        self.zip64_sizes()
             || self.header_start > 0xFFFFFFFF
+    }
+
+    pub(crate) fn gp_flags(&self) -> u16 {
+        let mut flag = 0;
+        if !self.file_name.is_ascii() {
+            flag |= 1u16 << 11
+        }
+        if self.encrypted {
+            flag |= 1u16 << 0
+        };
+        if self.using_data_descriptor {
+            flag |= 1u16 << 3;
+        }
+        flag
+    }
+
+    pub(crate) fn local_header_size(&self) -> u64 {
+        let mut size = 30 + self.extra_field.len() as u64;
+        if self.file_name_raw.is_empty() {
+            size += self.file_name.as_bytes().len() as u64;
+        } else {
+            size += self.file_name_raw.len() as u64;
+        };
+        // The local header does not necessarily need to be zip64 when its
+        // offset exceeds the 2^32 boundary.
+        if self.zip64_sizes() || self.large_file {
+            size += 20;
+        }
+        size
     }
 
     pub fn version_needed(&self) -> u16 {

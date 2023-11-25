@@ -9,7 +9,7 @@ description = """
 Library to support the reading and writing of zip files.
 """
 edition = "2021"
-rust-version = "1.59.0"
+rust-version = "1.65.0"
 
 [dependencies]
 aes = { version = "0.8.2", optional = true }
