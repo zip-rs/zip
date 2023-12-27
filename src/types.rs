@@ -4,7 +4,8 @@ use std::path;
 #[cfg(not(any(
     all(target_arch = "arm", target_pointer_width = "32"),
     target_arch = "mips",
-    target_arch = "powerpc"
+    target_arch = "powerpc",
+    target_arch = "xtensa"
 )))]
 use std::sync::atomic;
 #[cfg(not(feature = "time"))]
@@ -20,7 +21,8 @@ mod ffi {
 #[cfg(any(
     all(target_arch = "arm", target_pointer_width = "32"),
     target_arch = "mips",
-    target_arch = "powerpc"
+    target_arch = "powerpc",
+    target_arch = "xtensa"
 ))]
 mod atomic {
     use crossbeam_utils::sync::ShardedLock;
