@@ -32,6 +32,7 @@ bencher = "0.1.5"
 getrandom = "0.2.5"
 walkdir = "2.3.2"
 time = { version = "0.3.7", features = ["formatting", "macros"] }
+clap = { version = "4.4.14", features = ["derive"] }
 
 [features]
 aes-crypto = [ "aes", "constant_time_eq", "hmac", "pbkdf2", "sha1" ]
