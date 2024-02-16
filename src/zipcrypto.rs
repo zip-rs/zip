@@ -159,11 +159,12 @@ impl<R: std::io::Read> std::io::Read for ZipCryptoReaderValid<R> {
         // Note: There might be potential for optimization. Inspiration can be found at:
         // https://github.com/kornelski/7z/blob/master/CPP/7zip/Crypto/ZipCrypto.cpp
 
-        let result = self.reader.file.read(buf);
-        for byte in buf.iter_mut() {
+        let n = self.reader.file.read(buf)?;
+        for byte in buf.iter_mut().take(n) {
             *byte = self.reader.keys.decrypt_byte(*byte);
         }
-        result
+
+        Ok(n)
     }
 }
 
