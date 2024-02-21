@@ -1004,8 +1004,10 @@ impl<'a> Drop for ZipFile<'a> {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(_) => (),
-                    Err(e) => {
-                        panic!("Could not consume all of the output of the current ZipFile: {e:?}")
+                    Err(_) => {
+                        // silently ignore this error - we're just trying to exhaust the reader
+                        // any further uses of the reader will return an error in a more appropriate context
+                        break;
                     }
                 }
             }
