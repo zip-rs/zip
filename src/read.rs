@@ -466,6 +466,11 @@ impl<R: Read + io::Seek> ZipArchive<R> {
                 }
                 let mut outfile = fs::File::create(&outpath)?;
                 io::copy(&mut file, &mut outfile)?;
+
+                // Set original timestamp.
+                if let Some(t) = datetime_to_systemtime(&file.last_modified()) {
+                    outfile.set_modified(t)?;
+                }
             }
             // Get and Set permissions
             #[cfg(unix)]
@@ -1127,6 +1132,33 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         crypto_reader: None,
         reader: make_reader(result_compression_method, result_crc32, crypto_reader),
     }))
+}
+
+/// Generate a `SystemTime` from a `DateTime`.
+fn datetime_to_systemtime(datetime: &DateTime) -> Option<std::time::SystemTime> {
+    if let Some(t) = generate_chrono_datetime(datetime) {
+        let time = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(t, chrono::Utc);
+        return Some(time.into());
+    }
+    None
+}
+
+/// Generate a `NaiveDateTime` from a `DateTime`.
+fn generate_chrono_datetime(datetime: &DateTime) -> Option<chrono::NaiveDateTime> {
+    if let Some(d) = chrono::NaiveDate::from_ymd_opt(
+        datetime.year().into(),
+        datetime.month().into(),
+        datetime.day().into(),
+    ) {
+        if let Some(d) = d.and_hms_opt(
+            datetime.hour().into(),
+            datetime.minute().into(),
+            datetime.second().into(),
+        ) {
+            return Some(d);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
