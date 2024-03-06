@@ -187,6 +187,7 @@ mod test {
     }
 
     #[test]
+    #[allow(invalid_from_utf8)]
     fn example_slice() {
         use super::FromCp437;
         let data = b"Cura\x87ao";

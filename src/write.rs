@@ -397,6 +397,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 external_attributes: permissions << 16,
                 large_file: options.large_file,
                 aes_mode: None,
+                extra_fields: Vec::new(),
             };
             write_local_file_header(writer, &file)?;
 
@@ -411,7 +412,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         }
         if let Some(keys) = options.encrypt_with {
             let mut zipwriter = crate::zipcrypto::ZipCryptoWriter { writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(), buffer: vec![], keys };
-            let mut crypto_header = [0u8; 12];
+            let crypto_header = [0u8; 12];
 
             zipwriter.write_all(&crypto_header)?;
             self.inner = GenericZipWriter::Storer(MaybeEncrypted::Encrypted(zipwriter));

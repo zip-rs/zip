@@ -5,6 +5,7 @@ use crate::aes::{AesReader, AesReaderValid};
 use crate::compression::CompressionMethod;
 use crate::cp437::FromCp437;
 use crate::crc32::Crc32Reader;
+use crate::extra_fields::{ExtendedTimestamp, ExtraField};
 use crate::result::{InvalidPassword, ZipError, ZipResult};
 use crate::spec;
 use crate::types::{AesMode, AesVendorVersion, AtomicU64, DateTime, System, ZipFileData};
@@ -724,6 +725,7 @@ fn central_header_to_zip_file_inner<R: Read>(
         external_attributes: external_file_attributes,
         large_file: false,
         aes_mode: None,
+        extra_fields: Vec::new(),
     };
 
     match parse_extra_field(&mut result) {
@@ -802,6 +804,17 @@ fn parse_extra_field(file: &mut ZipFileData) -> ZipResult<()> {
                     #[allow(deprecated)]
                     CompressionMethod::from_u16(compression_method)
                 };
+            }
+            0x5455 => {
+                // extended timestamp
+                // https://libzip.org/specifications/extrafld.txt
+
+                file.extra_fields.push(ExtraField::ExtendedTimestamp(
+                    ExtendedTimestamp::try_from_reader(&mut reader, len)?,
+                ));
+
+                // the reader for ExtendedTimestamp consumes `len` bytes
+                len_left = 0;
             }
             _ => {
                 // Other fields are ignored
@@ -935,8 +948,7 @@ impl<'a> ZipFile<'a> {
     pub fn is_dir(&self) -> bool {
         self.name()
             .chars()
-            .rev()
-            .next()
+            .next_back()
             .map_or(false, |c| c == '/' || c == '\\')
     }
 
@@ -973,6 +985,11 @@ impl<'a> ZipFile<'a> {
     pub fn central_header_start(&self) -> u64 {
         self.data.central_header_start
     }
+    
+    /// iterate through all extra fields
+    pub fn extra_data_fields(&self) -> impl Iterator<Item=&ExtraField> {
+        self.data.extra_fields.iter()
+    }
 }
 
 impl<'a> Read for ZipFile<'a> {
@@ -991,7 +1008,7 @@ impl<'a> Drop for ZipFile<'a> {
             // Get the inner `Take` reader so all decryption, decompression and CRC calculation is skipped.
             let mut reader: std::io::Take<&mut dyn std::io::Read> = match &mut self.reader {
                 ZipFileReader::NoReader => {
-                    let innerreader = ::std::mem::replace(&mut self.crypto_reader, None);
+                    let innerreader = self.crypto_reader.take();
                     innerreader.expect("Invalid reader state").into_inner()
                 }
                 reader => {
@@ -1091,6 +1108,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         external_attributes: 0,
         large_file: false,
         aes_mode: None,
+        extra_fields: Vec::new(),
     };
 
     match parse_extra_field(&mut result) {
