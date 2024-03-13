@@ -456,7 +456,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
 
             let outpath = directory.as_ref().join(filepath);
 
-            if file.name().ends_with('/') {
+            if file.is_dir() {
                 fs::create_dir_all(&outpath)?;
             } else {
                 if let Some(p) = outpath.parent() {
